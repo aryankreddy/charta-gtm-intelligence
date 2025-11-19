@@ -6,5 +6,5 @@ duckdb
 beautifulsoup4
 fastapi
 uvicorn[standard]
-fastapi
-uvicorn[standard]
+fuzzywuzzy
+python-Levenshtein

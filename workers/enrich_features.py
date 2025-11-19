@@ -93,6 +93,39 @@ def build_util_features(util: pd.DataFrame) -> pd.DataFrame:
     return agg
 
 
+def build_oig_leie_features() -> pd.DataFrame:
+    """
+    Load OIG LEIE matches and create features.
+    
+    Returns:
+        DataFrame with clinic_id, oig_leie_flag, oig_exclusion_type
+    """
+    oig_matches_path = os.path.join(STAGING_DIR, "oig_leie_matches.csv")
+    
+    if not os.path.exists(oig_matches_path):
+        print("No OIG LEIE matches found. Run enrich_oig_leie first.")
+        return pd.DataFrame(columns=["clinic_id", "oig_leie_flag", "oig_exclusion_type"])
+    
+    try:
+        matches = pd.read_csv(oig_matches_path, low_memory=False)
+        if matches.empty:
+            return pd.DataFrame(columns=["clinic_id", "oig_leie_flag", "oig_exclusion_type"])
+        
+        # Create features: flag and exclusion type
+        features = matches[["clinic_id", "exclusion_type"]].copy()
+        features["oig_leie_flag"] = True
+        features = features.rename(columns={"exclusion_type": "oig_exclusion_type"})
+        
+        # If multiple matches per clinic, take the first (most recent would be better, but we don't have dates sorted)
+        features = features.drop_duplicates(subset=["clinic_id"], keep="first")
+        
+        print(f"Loaded OIG LEIE features for {len(features)} clinics")
+        return features
+    except Exception as e:
+        print(f"Error loading OIG LEIE matches: {e}")
+        return pd.DataFrame(columns=["clinic_id", "oig_leie_flag", "oig_exclusion_type"])
+
+
 def main():
     staging = Path(STAGING_DIR)
     npi = read_parquet(str(staging / "stg_npi_orgs.parquet"))
@@ -109,6 +142,7 @@ def main():
     pecos_features = build_pecos_features(pecos)
     aco_features = build_aco_features(aco)
     util_features = build_util_features(util)
+    oig_features = build_oig_leie_features()
 
     df = npi.copy()
     df["org_name_norm"] = df["org_name"].map(normalize_name)
@@ -199,6 +233,24 @@ def main():
         axis=1,
     )
 
+    # Merge OIG LEIE features by clinic_id
+    if not oig_features.empty:
+        df = safe_merge(df, oig_features, on="clinic_id")
+    else:
+        df["oig_leie_flag"] = False
+        df["oig_exclusion_type"] = None
+
+    # Set defaults for OIG fields if missing
+    if "oig_leie_flag" not in df.columns:
+        df["oig_leie_flag"] = False
+    else:
+        df["oig_leie_flag"] = df["oig_leie_flag"].fillna(False)
+    
+    if "oig_exclusion_type" not in df.columns:
+        df["oig_exclusion_type"] = None
+    else:
+        df["oig_exclusion_type"] = df["oig_exclusion_type"].fillna(None)
+
     clinics = df[
         [
             "clinic_id",
@@ -221,6 +273,8 @@ def main():
             "services_count",
             "allowed_amt",
             "bene_count",
+            "oig_leie_flag",
+            "oig_exclusion_type",
         ]
     ].drop_duplicates(subset=["clinic_id"])
 

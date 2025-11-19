@@ -146,7 +146,7 @@ def process_hrsa(source_cfg: Dict) -> pd.DataFrame:
     path = abs_path(source_cfg.get("url"))
     if not os.path.exists(path):
         print(f'Skipping HRSA ingestion; file not found: {path}')
-        return pd.DataFrame(columns=["site_id", "org_name", "site_name", "address", "city", "state", "zip", "fqhc_flag"])
+        return pd.DataFrame(columns=["site_id", "org_name", "site_name", "address", "city", "state", "zip", "npi", "fqhc_flag"])
     df = pd.read_csv(path, dtype="string", low_memory=False)
 
     def first_match(candidates: List[str]) -> str:
@@ -161,12 +161,12 @@ def process_hrsa(source_cfg: Dict) -> pd.DataFrame:
         return pd.Series(["" for _ in range(len(df))], index=df.index)
 
     name_col = first_match(["site_name", "Site Name", "site"])
-    org_col = first_match(["parent_organization_name", "Parent Organization", "organization_name", name_col])
-    state_col = first_match(["state", "State", "state_abbr"])
-    city_col = first_match(["city", "City"])
-    zip_col = first_match(["zip", "Zip", "zip_code"])
+    org_col = first_match(["parent_organization_name", "Parent Organization", "organization_name", "Health Center Name", name_col])
+    state_col = first_match(["state", "State", "state_abbr", "Site State Abbreviation"])
+    city_col = first_match(["city", "City", "Site City"])
+    zip_col = first_match(["zip", "Zip", "zip_code", "Site Postal Code"])
     address_col = first_match(["address", "Site Address", "street_address", "Street Address"])
-    fqhc_col = first_match(["fqhc_lookalike", "is_fqhc", "FQHC"])
+    npi_col = first_match(["npi", "NPI", "FQHC Site NPI Number"])
 
     site_ids = column_or_blank("site_id") if "site_id" in df.columns else pd.Series(df.index.astype(str), index=df.index)
 
@@ -179,11 +179,8 @@ def process_hrsa(source_cfg: Dict) -> pd.DataFrame:
             "city": column_or_blank(city_col).str.title(),
             "state": column_or_blank(state_col).str.upper(),
             "zip": column_or_blank(zip_col).map(normalize_zip),
-            "fqhc_flag": column_or_blank(fqhc_col)
-            .fillna("N")
-            .str.upper()
-            .isin(["Y", "1", "TRUE"])
-            .astype(int),
+            "npi": column_or_blank(npi_col),
+            "fqhc_flag": 1,  # All HRSA records are FQHCs or Look-Alikes by definition
         }
     )
 
