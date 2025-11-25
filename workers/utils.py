@@ -7,20 +7,30 @@ import pandas as pd
 import requests
 
 def stream_csv(
-    path: str,
+    path_or_handle: Any,
     chunksize: int = 100_000,
     usecols: Optional[List[str]] = None,
     dtype: Optional[Dict[str, Any]] = None,
     low_memory: bool = False,
     encoding: str = "utf-8",
+    sep: str = ",",
+    header: Optional[Union[int, str]] = "infer",
+    names: Optional[List[str]] = None,
 ) -> Iterator[pd.DataFrame]:
+    """
+    Stream a CSV file in chunks.
+    path_or_handle: File path (str) or file-like object.
+    """
     reader = pd.read_csv(
-        path,
+        path_or_handle,
         chunksize=chunksize,
         dtype=dtype,
         usecols=usecols,
         low_memory=low_memory,
         encoding=encoding,
+        sep=sep,
+        header=header,
+        names=names,
         on_bad_lines="skip",
     )
     for chunk in reader:
