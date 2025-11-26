@@ -10,17 +10,19 @@ import pandas as pd
 import numpy as np
 import os
 import sys
+import subprocess
 import warnings
+from datetime import datetime, timedelta
 from typing import Dict, Any
 
 # Add project root to path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 # Import Scoring Engine
-from workers.score_icp import calculate_score
+from workers.pipeline.score_icp_production import calculate_score
 
 # Configuration
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 DATA_RAW = os.path.join(ROOT, "data", "raw")
 DATA_CURATED = os.path.join(ROOT, "data", "curated")
 DATA_STAGING = os.path.join(DATA_CURATED, "staging")
@@ -47,6 +49,43 @@ def normalize_name(name):
     name = name.replace(".", "").replace(",", "").replace(" INC", "").replace(" LLC", "").replace(" PC", "")
     name = name.replace(" CLINIC", "").replace(" CENTER", "").replace(" HEALTH", "")
     return name
+
+def ensure_staging_file(file_path: str, miner_script: str, max_age_days: int = 7) -> None:
+    """
+    Ensure staging file exists and is fresh. Run miner if needed.
+
+    Args:
+        file_path: Path to staging file (e.g., stg_undercoding_metrics.csv)
+        miner_script: Path to miner script relative to ROOT (e.g., workers/pipeline/mine_cpt_codes.py)
+        max_age_days: Maximum age of staging file before re-running miner
+    """
+    file_exists = os.path.exists(file_path)
+    is_fresh = False
+
+    if file_exists:
+        file_age = datetime.now() - datetime.fromtimestamp(os.path.getmtime(file_path))
+        is_fresh = file_age < timedelta(days=max_age_days)
+
+    if not file_exists or not is_fresh:
+        age_str = f"(age: {file_age.days} days)" if file_exists else "(missing)"
+        print(f"   ⚙️  Running {miner_script} {age_str}...")
+
+        miner_path = os.path.join(ROOT, miner_script)
+        result = subprocess.run(
+            [sys.executable, miner_path],
+            capture_output=True,
+            text=True,
+            cwd=ROOT
+        )
+
+        if result.returncode != 0:
+            print(f"   ❌ Miner failed with code {result.returncode}")
+            print(f"   STDERR: {result.stderr}")
+            raise RuntimeError(f"Miner {miner_script} failed")
+
+        print(f"   ✅ Miner completed successfully")
+    else:
+        print(f"   ✅ Using cached staging file (age: {file_age.days} days)")
 
 def load_ccn_to_npi_crosswalk():
     """
@@ -108,16 +147,18 @@ def load_seed():
     if not os.path.exists(SEED_FILE):
         raise FileNotFoundError(f"Seed file not found: {SEED_FILE}")
     df = pd.read_csv(SEED_FILE, low_memory=False)
-    # Ensure NPI is int64
+    # Ensure NPI is int64 (filter out invalid NPIs instead of converting NULL to 0)
     if 'npi' in df.columns:
-        df['npi'] = pd.to_numeric(df['npi'], errors='coerce').fillna(0).astype(np.int64)
-    
+        df['npi'] = pd.to_numeric(df['npi'], errors='coerce')
+        df = df[df['npi'].notnull()].copy()  # Filter out invalid NPIs
+        df['npi'] = df['npi'].astype(np.int64)
+
     # Create normalized name for matching
     if 'org_name' in df.columns:
         df['norm_name'] = df['org_name'].apply(normalize_name)
     else:
         df['norm_name'] = ""
-        
+
     return df
 
 # ============================================================================
@@ -161,10 +202,12 @@ def integrate_physician_util(df):
     
     print(f"   Loading {path}...")
     util = pd.read_parquet(path)
-    
-    # Ensure NPI is int64
-    util['npi'] = pd.to_numeric(util['npi'], errors='coerce').fillna(0).astype(np.int64)
-    
+
+    # Ensure NPI is int64 (filter out invalid NPIs instead of converting NULL to 0)
+    util['npi'] = pd.to_numeric(util['npi'], errors='coerce')
+    util = util[util['npi'].notnull()].copy()
+    util['npi'] = util['npi'].astype(np.int64)
+
     # Load Bridge
     bridge = load_pecos_bridge()
     
@@ -250,18 +293,28 @@ def integrate_physician_util(df):
 
 def integrate_undercoding_metrics(df):
     print_section("1B. INTEGRATING UNDERCODING METRICS")
-    
+
     path = os.path.join(DATA_STAGING, "stg_undercoding_metrics.csv")
+
+    # NEW: Auto-run miner if needed
+    ensure_staging_file(
+        file_path=path,
+        miner_script="workers/pipeline/mine_cpt_codes.py",
+        max_age_days=7
+    )
+
     if not os.path.exists(path):
-        print(f"   ⚠️  Undercoding metrics not found: {path}. Run workers/mine_cpt_codes.py first.")
-        return df
-        
+        # Should never reach here after ensure_staging_file, but keep as safety
+        raise FileNotFoundError(f"Staging file missing: {path}. Miner execution may have failed.")
+
     print(f"   Loading {path}...")
     metrics = pd.read_csv(path)
-    
-    # Ensure NPI is int64
-    metrics['npi'] = pd.to_numeric(metrics['npi'], errors='coerce').fillna(0).astype(np.int64)
-    
+
+    # Ensure NPI is int64 (filter out invalid NPIs instead of converting NULL to 0)
+    metrics['npi'] = pd.to_numeric(metrics['npi'], errors='coerce')
+    metrics = metrics[metrics['npi'].notnull()].copy()
+    metrics['npi'] = metrics['npi'].astype(np.int64)
+
     # Merge
     print(f"   Merging {len(metrics):,} undercoding records...")
     merged = df.merge(metrics[['npi', 'undercoding_ratio', 'total_eval_codes']], on='npi', how='left')
@@ -304,12 +357,13 @@ def integrate_fqhc_reports(df):
         print("   Matching by CCN-to-NPI Crosswalk...")
         fqhc['ccn'] = fqhc['PRVDR_NUM'].astype(str).str.strip()
         fqhc['npi_xwalk'] = fqhc['ccn'].map(ccn_to_npi)
-        
-        # Use crosswalk NPI if available
-        fqhc['npi'] = fqhc['npi_xwalk'].fillna(0).astype(np.int64)
-        
-        # Filter for matches
-        fqhc_matched = fqhc[fqhc['npi'] != 0].copy()
+
+        # Use crosswalk NPI if available (filter out NULL instead of converting to 0)
+        fqhc['npi'] = fqhc['npi_xwalk']
+        fqhc_matched = fqhc[fqhc['npi'].notnull()].copy()
+        fqhc_matched['npi'] = fqhc_matched['npi'].astype(np.int64)
+
+        # Filter for matches (now redundant, but keeping for clarity)
         print(f"   Mapped {len(fqhc_matched):,} FQHCs to NPIs via crosswalk")
         
         if len(fqhc_matched) > 0:
@@ -337,8 +391,10 @@ def integrate_fqhc_reports(df):
             
     elif 'npi' in fqhc.columns:
         print("   Matching by NPI (Direct)...")
-        fqhc['npi'] = pd.to_numeric(fqhc['npi'], errors='coerce').fillna(0).astype(np.int64)
-        
+        fqhc['npi'] = pd.to_numeric(fqhc['npi'], errors='coerce')
+        fqhc = fqhc[fqhc['npi'].notnull()].copy()
+        fqhc['npi'] = fqhc['npi'].astype(np.int64)
+
         # Split into matched and unmatched
         merged = df.merge(fqhc[['npi', 'fqhc_revenue', 'fqhc_expenses', 'fqhc_margin']], on='npi', how='left')
         
@@ -792,23 +848,23 @@ def apply_hierarchy_and_score(df):
     df['margin_source'] = "Estimated (Low)"
     
     # 1. Revenue Hierarchy
-    # Medicare * 3
-    mask_med = df['real_medicare_revenue'].gt(0)
+    # Medicare * 3 (NULL-aware: distinguish NULL from 0)
+    mask_med = df['real_medicare_revenue'].notnull() & df['real_medicare_revenue'].gt(0)
     df.loc[mask_med, 'final_revenue'] = df.loc[mask_med, 'real_medicare_revenue'] * 3.0
     df.loc[mask_med, 'revenue_source'] = "Medicare Claims (Med)"
-    
+
     # FQHC (Overrides Medicare)
-    mask_fqhc = df['fqhc_revenue'].gt(0)
+    mask_fqhc = df['fqhc_revenue'].notnull() & df['fqhc_revenue'].gt(0)
     df.loc[mask_fqhc, 'final_revenue'] = df.loc[mask_fqhc, 'fqhc_revenue']
     df.loc[mask_fqhc, 'revenue_source'] = "Cost Report (High)"
-    
+
     # 2. Volume Hierarchy
-    mask_vol = df['real_annual_encounters'].gt(0)
+    mask_vol = df['real_annual_encounters'].notnull() & df['real_annual_encounters'].gt(0)
     df.loc[mask_vol, 'final_volume'] = df.loc[mask_vol, 'real_annual_encounters']
     df.loc[mask_vol, 'volume_source'] = "Claims/HRSA (High)"
-    
+
     # 3. Margin Hierarchy
-    mask_margin = df['fqhc_margin'].notnull()
+    mask_margin = df['fqhc_margin'].notnull()  # Already correct!
     df.loc[mask_margin, 'final_margin'] = df.loc[mask_margin, 'fqhc_margin']
     df.loc[mask_margin, 'margin_source'] = "Cost Report (High)"
     
@@ -858,6 +914,14 @@ def integrate_hrsa_data(df):
     hrsa['norm_name'] = hrsa['Site Name'].apply(normalize_name)
     hrsa['norm_state'] = hrsa['State'].astype(str).str.upper().str.strip()
     
+    # Check for grant number column
+    grant_col = None
+    for col in hrsa.columns:
+        if 'grant' in col.lower() or 'bhcmis' in col.lower():
+            grant_col = col
+            print(f"   Found grant number column: {grant_col}")
+            break
+    
     if 'City' in hrsa.columns:
         hrsa['norm_city'] = hrsa['City'].astype(str).str.upper().str.strip()
         use_city = True
@@ -905,8 +969,15 @@ def integrate_hrsa_data(df):
     common_blocks = set(hrsa['block_key']).intersection(set(df['block_key']))
     print(f"   Processing {len(common_blocks):,} common location blocks...")
     
+    # Build merge columns list
+    merge_cols = ['block_key', 'norm_name', 'Site Name']
+    if vol_col:
+        merge_cols.append(vol_col)
+    if grant_col:
+        merge_cols.append(grant_col)
+    
     # Exact Name Match within Block
-    merged = df.merge(hrsa[['block_key', 'norm_name', 'Site Name'] + ([vol_col] if vol_col else [])], 
+    merged = df.merge(hrsa[merge_cols], 
                      on=['block_key', 'norm_name'], 
                      how='inner', suffixes=('', '_hrsa'))
                      
@@ -917,6 +988,21 @@ def integrate_hrsa_data(df):
         # Set FQHC Flag
         df.loc[merged.index, 'fqhc_flag'] = 1
         df.loc[merged.index, 'segment_label'] = 'Segment B'
+        
+        # Store grant numbers if available
+        if grant_col and grant_col in merged.columns:
+            # Initialize grant_number column if not exists
+            if 'grant_number' not in df.columns:
+                df['grant_number'] = None
+            
+            # Create map: NPI -> Grant Number
+            npi_grant_map = dict(zip(merged['npi'], merged[grant_col]))
+            
+            # Update grant numbers
+            for npi, grant_num in npi_grant_map.items():
+                df.loc[df['npi'] == npi, 'grant_number'] = grant_num
+            
+            print(f"   ✅ Stored grant numbers for {len(npi_grant_map):,} clinics.")
         
         if vol_col:
             # Overwrite Volume
@@ -938,14 +1024,19 @@ def integrate_psych_metrics(df):
     Merge Behavioral Health Signals (Psych Risk Ratio).
     """
     print_section("INTEGRATING BEHAVIORAL HEALTH SIGNALS")
-    
+
     psych_file = os.path.join(DATA_STAGING, "stg_psych_metrics.csv")
-    
+
+    # NEW: Auto-run miner if needed
+    ensure_staging_file(
+        file_path=psych_file,
+        miner_script="workers/pipeline/mine_psych_codes.py",
+        max_age_days=7
+    )
+
     if not os.path.exists(psych_file):
-        print(f"   ⚠️  Psych metrics file not found: {psych_file}")
-        print(f"   💡 Run workers/mine_psych_codes.py first.")
-        return df
-    
+        raise FileNotFoundError(f"Staging file missing: {psych_file}. Miner execution may have failed.")
+
     print(f"   Loading {psych_file}...")
     psych_df = pd.read_csv(psych_file, dtype={'npi': str})
     
@@ -958,16 +1049,163 @@ def integrate_psych_metrics(df):
     # Merge
     before = len(df)
     df = df.merge(psych_df[['npi', 'total_psych_codes', 'psych_risk_ratio']], on='npi', how='left')
-    
-    # Fill NaN with 0
+
+    # Fill total_psych_codes with 0 (0 codes is a valid value)
     df['total_psych_codes'] = df['total_psych_codes'].fillna(0)
-    df['psych_risk_ratio'] = df['psych_risk_ratio'].fillna(0)
-    
-    matched = df['psych_risk_ratio'].gt(0).sum()
+    # Keep psych_risk_ratio as NULL when no data (NULL ≠ 0 for risk ratio)
+
+    matched = df['psych_risk_ratio'].notnull().sum()
     print(f"   ✅ Matched {matched:,} clinics with behavioral health signals ({matched/before:.1%})")
     
     high_risk = df['psych_risk_ratio'].gt(0.80).sum()
     print(f"   🚨 High Audit Risk (>0.80): {high_risk:,} clinics")
+    
+    return df
+
+def integrate_uds_volume(df):
+    """
+    Integrate HRSA UDS 2024 verified patient volume data.
+    Updates real_annual_encounters with official UDS patient counts.
+    """
+    print_section("INTEGRATING HRSA UDS 2024 VERIFIED VOLUME")
+    
+    uds_file = os.path.join(DATA_STAGING, "stg_uds_volume.csv")
+    
+    # Auto-run ingestion script if needed
+    ensure_staging_file(
+        file_path=uds_file,
+        miner_script="workers/pipeline/ingest_uds_volume.py",
+        max_age_days=30  # UDS data is annual, can cache longer
+    )
+    
+    if not os.path.exists(uds_file):
+        print(f"   ⚠️  UDS volume file not found: {uds_file}")
+        print(f"   💡 Ensure HRSA UDS files are available in data/raw/hrsa/")
+        return df
+    
+    print(f"   Loading {uds_file}...")
+    uds_df = pd.read_csv(uds_file, dtype={'grant_number': str})
+    
+    print(f"   Loaded {len(uds_df):,} health centers with UDS volume data")
+    
+    # Check if we have grant_number in main df
+    if 'grant_number' not in df.columns:
+        print("   ⚠️  grant_number column not found in main dataframe.")
+        print("   💡 Attempting to retrieve grant numbers from HRSA staging data...")
+        
+        # Try to load HRSA data with grant numbers
+        hrsa_staging = os.path.join(DATA_STAGING, "stg_hrsa_sites.parquet")
+        if os.path.exists(hrsa_staging):
+            hrsa_df = pd.read_parquet(hrsa_staging)
+            
+            # Check for grant number columns in HRSA data
+            grant_col_candidates = ['grant_number', 'Grant Number', 'BHCMIS ID', 'bhcmis_id']
+            grant_col = None
+            for candidate in grant_col_candidates:
+                if candidate in hrsa_df.columns:
+                    grant_col = candidate
+                    break
+            
+            if grant_col and 'org_name' in hrsa_df.columns:
+                print(f"   Found grant numbers in HRSA staging data (column: {grant_col})")
+                
+                # Normalize names for matching
+                hrsa_df['norm_name'] = hrsa_df['org_name'].apply(normalize_name)
+                
+                # Create mapping: normalized name -> grant number
+                grant_map = hrsa_df.set_index('norm_name')[grant_col].to_dict()
+                
+                # Apply to main df
+                if 'norm_name' not in df.columns:
+                    if 'org_name' in df.columns:
+                        df['norm_name'] = df['org_name'].apply(normalize_name)
+                
+                df['grant_number'] = df['norm_name'].map(grant_map)
+                
+                mapped_count = df['grant_number'].notnull().sum()
+                print(f"   ✅ Mapped grant numbers for {mapped_count:,} organizations")
+            else:
+                print(f"   ⚠️  Could not find grant numbers in HRSA staging data")
+        else:
+            print(f"   ⚠️  HRSA staging file not found: {hrsa_staging}")
+        
+        # If still no grant_number column, try the raw HRSA file
+        if 'grant_number' not in df.columns:
+            hrsa_raw = os.path.join(DATA_RAW, "hrsa", "Health_Center_Service_Delivery_and_LookAlike_Sites (1).csv")
+            if os.path.exists(hrsa_raw):
+                print("   Attempting to load grant numbers from raw HRSA file...")
+                try:
+                    hrsa_raw_df = pd.read_csv(hrsa_raw, header=2)
+                    
+                    # Find grant number column
+                    grant_col = None
+                    for col in hrsa_raw_df.columns:
+                        if 'grant' in col.lower() or 'bhcmis' in col.lower():
+                            grant_col = col
+                            break
+                    
+                    if grant_col and 'Site Name' in hrsa_raw_df.columns:
+                        hrsa_raw_df['norm_name'] = hrsa_raw_df['Site Name'].apply(normalize_name)
+                        grant_map = hrsa_raw_df.set_index('norm_name')[grant_col].to_dict()
+                        
+                        if 'norm_name' not in df.columns:
+                            if 'org_name' in df.columns:
+                                df['norm_name'] = df['org_name'].apply(normalize_name)
+                        
+                        df['grant_number'] = df['norm_name'].map(grant_map)
+                        
+                        mapped_count = df['grant_number'].notnull().sum()
+                        print(f"   ✅ Mapped grant numbers for {mapped_count:,} organizations from raw file")
+                except Exception as e:
+                    print(f"   ⚠️  Error loading raw HRSA file: {e}")
+    
+    # Check again if we have grant_number
+    if 'grant_number' not in df.columns or df['grant_number'].notnull().sum() == 0:
+        print("   ❌ Unable to establish grant_number mappings. Skipping UDS volume integration.")
+        return df
+    
+    # Clean grant numbers for matching
+    df['grant_number_clean'] = df['grant_number'].astype(str).str.strip().str.upper()
+    uds_df['grant_number_clean'] = uds_df['grant_number'].astype(str).str.strip().str.upper()
+    
+    # Merge UDS volume data
+    print(f"   Merging UDS volume data on grant_number...")
+    merged = df.merge(uds_df[['grant_number_clean', 'uds_patient_count']], 
+                     on='grant_number_clean', how='left', suffixes=('', '_uds'))
+    
+    # Count matches
+    matches = merged['uds_patient_count'].notnull().sum()
+    
+    if matches > 0:
+        print(f"   ✅ Matched {matches:,} FQHCs with UDS verified volume")
+        
+        # Update real_annual_encounters for matched records
+        # UDS data is the highest quality source, so overwrite
+        mask = merged['uds_patient_count'].notnull()
+        df.loc[mask, 'real_annual_encounters'] = merged.loc[mask, 'uds_patient_count']
+        
+        # Initialize volume_source column if not exists
+        if 'volume_source' not in df.columns:
+            df['volume_source'] = "Estimated (Low)"
+        
+        # Update source
+        df.loc[mask, 'volume_source'] = 'HRSA UDS Verified'
+        
+        # Stats
+        avg_volume = merged.loc[mask, 'uds_patient_count'].mean()
+        total_volume = merged.loc[mask, 'uds_patient_count'].sum()
+        
+        print(f"   📊 UDS Volume Statistics:")
+        print(f"      Total Patients: {total_volume:,.0f}")
+        print(f"      Avg per HC: {avg_volume:,.0f}")
+        print(f"      Min: {merged.loc[mask, 'uds_patient_count'].min():,.0f}")
+        print(f"      Max: {merged.loc[mask, 'uds_patient_count'].max():,.0f}")
+    else:
+        print(f"   ⚠️  No grant number matches found. Check grant_number format in seed data.")
+    
+    # Clean up temporary column
+    if 'grant_number_clean' in df.columns:
+        df.drop(columns=['grant_number_clean'], inplace=True)
     
     return df
 
@@ -989,6 +1227,7 @@ def run_pipeline():
     df = integrate_hospital_reports(df)
     df = integrate_hha_reports(df)
     df = integrate_hrsa_data(df)
+    df = integrate_uds_volume(df)  # NEW: HRSA UDS 2024 Verified Volume
     df = integrate_strategic_data(df)
     
     # 3. Score
@@ -1003,7 +1242,7 @@ def run_pipeline():
     
     # Run Scoring Engine
     print_section("RUNNING SCORING ENGINE")
-    from workers.score_icp import main as run_scoring
+    from workers.pipeline.score_icp_production import main as run_scoring
     run_scoring()
     
     # Reload Scored Data for Reporting
