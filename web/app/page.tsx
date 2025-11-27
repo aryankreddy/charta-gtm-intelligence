@@ -113,7 +113,7 @@ export default function Dashboard() {
               </div>
               <div>
                 <h1 className="text-xl font-bold text-brand-900 tracking-tight">Charta Lead Database</h1>
-                <p className="text-[10px] text-brand-600 mt-0.5">Top 2,500 organizations · 1.4M+ scored nationwide</p>
+                <p className="text-[10px] text-brand-600 mt-0.5">Top 5,000 organizations · 1.4M+ scored nationwide</p>
               </div>
             </div>
             <div className="flex items-center gap-3">

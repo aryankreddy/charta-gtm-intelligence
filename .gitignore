@@ -34,3 +34,4 @@ data/curated/
 data/raw/*
 data/curated/*
 .env
+.vercel
