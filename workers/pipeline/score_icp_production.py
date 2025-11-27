@@ -118,35 +118,56 @@ def score_undercoding_continuous(ratio):
 
 def score_psych_risk_continuous(ratio):
     """
-    Continuous scoring for psych audit risk (BEHAVIORAL track).
+    BIDIRECTIONAL scoring for behavioral health therapy coding (BEHAVIORAL track).
+
+    Deviation from 0.50 benchmark = pain signal (U-shaped curve).
+
+    Low ratio (<0.30): Conservative coding → Undercoding/Revenue Leakage
+    Sweet spot (0.40-0.60): Balanced therapy distribution → Appropriate coding
+    High ratio (>0.75): Aggressive coding → Audit Risk/Compliance Threat
 
     Maps:
-    - 0.75+ (severe) → 40 points
-    - 0.50-0.75 (elevated) → 30-40 points
-    - 0.25-0.50 (moderate) → 20-30 points
-    - 0.0-0.25 (low/clean) → 10-20 points
+    - ≤0.30 (severe undercoding) → 40 points - "Revenue Leakage"
+    - 0.30-0.40 (moderate undercoding) → 25-40 points
+    - 0.40-0.60 (balanced/appropriate) → 10 points - "Sweet spot"
+    - 0.60-0.75 (moderate overcoding) → 25-40 points
+    - ≥0.75 (severe overcoding) → 40 points - "Audit Risk"
 
     Returns: (score, reasoning_text)
     """
     if ratio <= 0 or pd.isna(ratio):
         return 10, "No psych risk data available"
 
-    if ratio >= PSYCH_RISK_SEVERE:
-        return 40, f"Severe psych audit risk ({ratio:.3f})"
-    
-    if ratio >= 0.50:
-        # Elevated risk: 30-40 points
-        score = 30 + ((ratio - 0.50) / (PSYCH_RISK_SEVERE - 0.50)) * 10
-        return round(score, 1), f"Elevated psych audit risk ({ratio:.3f})"
-    
-    if ratio >= 0.25:
-        # Moderate risk: 20-30 points
-        score = 20 + ((ratio - 0.25) / 0.25) * 10
-        return round(score, 1), f"Moderate psych complexity ({ratio:.3f})"
+    BENCHMARK = 0.50  # National balanced therapy distribution
+    SEVERE_LOW = 0.30  # Conservative threshold
+    SEVERE_HIGH = 0.75  # Aggressive threshold
+    SWEET_SPOT_LOW = 0.40
+    SWEET_SPOT_HIGH = 0.60
 
-    # Low/clean: 10-20 points (still reward some complexity)
-    score = 10 + (ratio / 0.25) * 10
-    return round(score, 1), f"Low psych risk, clean billing ({ratio:.3f})"
+    # Severe undercoding (conservative)
+    if ratio <= SEVERE_LOW:
+        return 40, f"Severe therapy undercoding ({ratio:.3f}) - Revenue Leakage"
+
+    # Severe overcoding (aggressive)
+    elif ratio >= SEVERE_HIGH:
+        return 40, f"Severe psych audit risk ({ratio:.3f}) - Compliance Threat"
+
+    # Balanced coding (sweet spot)
+    elif SWEET_SPOT_LOW <= ratio <= SWEET_SPOT_HIGH:
+        return 10, f"Balanced therapy coding ({ratio:.3f}) - Appropriate"
+
+    # Moderate deviation from benchmark
+    elif ratio < SWEET_SPOT_LOW:
+        # Between 0.30 and 0.40 (moderate undercoding)
+        deviation = (SWEET_SPOT_LOW - ratio) / (SWEET_SPOT_LOW - SEVERE_LOW)
+        score = 10 + (deviation * 30)  # Linear from 10 to 40
+        return round(score, 1), f"Moderate therapy undercoding ({ratio:.3f})"
+
+    else:
+        # Between 0.60 and 0.75 (moderate overcoding)
+        deviation = (ratio - SWEET_SPOT_HIGH) / (SEVERE_HIGH - SWEET_SPOT_HIGH)
+        score = 10 + (deviation * 30)  # Linear from 10 to 40
+        return round(score, 1), f"Elevated psych audit risk ({ratio:.3f})"
 
 
 def score_behavioral_vbc_readiness(row):

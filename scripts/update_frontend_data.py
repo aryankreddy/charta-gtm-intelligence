@@ -253,16 +253,25 @@ def generate_strategic_brief(row, lift_value):
             f"Data indicates room for documentation improvement without changing clinical care."
         )
 
-    # === PSYCH AUDIT RISK SIGNAL ===
-    if pd.notna(psych_risk_ratio) and psych_risk_ratio > 0.75:
-        brief_parts.append(
-            f"Billing patterns show statistical anomaly in 60-minute codes ({psych_risk_ratio:.1%} of psych visits), "
-            f"creating immediate audit liability under CMS scrutiny."
-        )
-    elif pd.notna(psych_risk_ratio) and psych_risk_ratio > 0.50:
-        brief_parts.append(
-            f"Elevated use of time-based codes ({psych_risk_ratio:.1%}) suggests potential compliance exposure."
-        )
+    # === BEHAVIORAL HEALTH CODING SIGNALS (BIDIRECTIONAL) ===
+    if pd.notna(psych_risk_ratio):
+        # Conservative coding (undercoding therapy complexity)
+        if psych_risk_ratio <= 0.30:
+            brief_parts.append(
+                f"Claims analysis shows conservative therapy coding (only {psych_risk_ratio:.1%} high-complexity sessions vs. 50% national benchmark). "
+                f"This suggests systematic undercoding of therapy complexity, leaving verified revenue on the table."
+            )
+        # Aggressive coding (audit risk)
+        elif psych_risk_ratio >= 0.75:
+            brief_parts.append(
+                f"Billing patterns show statistical anomaly in high-complexity codes ({psych_risk_ratio:.1%} of therapy sessions vs. 50% benchmark), "
+                f"creating immediate audit liability and potential recoupment exposure under payer scrutiny."
+            )
+        # Moderate overcoding
+        elif psych_risk_ratio > 0.60:
+            brief_parts.append(
+                f"Elevated use of high-complexity therapy codes ({psych_risk_ratio:.1%} vs. 50% benchmark) suggests potential compliance exposure."
+            )
 
     # === HIGH VOLUME OPERATIONAL REALITY ===
     whale_volume = max(total_volume, uds_volume) if pd.notna(uds_volume) else total_volume
