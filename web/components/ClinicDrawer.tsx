@@ -304,9 +304,9 @@ export function ClinicDrawer({ clinic, onClose }: ClinicDrawerProps) {
               <span>{clinic.state}</span>
             </div>
             <div className="text-brand-600">{clinic.contact.address}</div>
-            {clinic.contact.phone && (
-              <div className="text-brand-600">{clinic.contact.phone}</div>
-            )}
+            <div className="text-brand-600">
+              {clinic.contact.phone || 'Phone: Available via NPPES lookup'}
+            </div>
             <div className="text-brand-500 text-xs font-mono">NPI: {clinic.id}</div>
           </div>
         </div>
