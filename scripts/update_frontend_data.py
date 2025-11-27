@@ -8,7 +8,7 @@ Output: web/public/data/clinics.json
 
 Key Features:
 - Revenue unit normalization (fix values < $10k)
-- Top 2,500 leads (expanded from 500)
+- Top 5,000 leads (expanded from 2,500)
 - Glass box analysis with ranking logic, gaps, benchmarks
 - Multi-level sorting (icp_score DESC, then est_revenue_lift DESC)
 """
@@ -61,12 +61,36 @@ def format_volume(value):
     return f"{int(value):,}"
 
 
+def format_phone(value):
+    """Format phone number to xxx-xxx-xxxx."""
+    if pd.isna(value) or value == '' or str(value).lower() == 'nan':
+        return ""
+
+    # Convert to string and remove any .0 suffix
+    phone_str = str(value).replace('.0', '').strip()
+
+    # Remove any non-digit characters
+    digits = ''.join(filter(str.isdigit, phone_str))
+
+    # Format as xxx-xxx-xxxx if we have 10 digits
+    if len(digits) == 10:
+        return f"{digits[0:3]}-{digits[3:6]}-{digits[6:10]}"
+    elif len(digits) == 11 and digits[0] == '1':
+        # Handle 1-xxx-xxx-xxxx format
+        return f"{digits[1:4]}-{digits[4:7]}-{digits[7:11]}"
+    elif len(digits) > 0:
+        # Return as-is if not standard format
+        return digits
+    else:
+        return ""
+
+
 def parse_drivers(scoring_drivers_str):
     """
     Parse emoji-based scoring_drivers string into UI tags.
 
     Emoji mappings:
-    - 🐋 -> purple (Strategic)
+    - 🐋 -> green (High Volume - was purple/Strategic)
     - 🩸 or 🚨 -> red (Urgent)
     - ✅ -> green (Verified)
     """
@@ -81,10 +105,13 @@ def parse_drivers(scoring_drivers_str):
         if not part:
             continue
 
-        # Determine color based on emoji
+        # Replace "Whale Scale" with "High Volume"
+        part = part.replace('🐋 Whale Scale', 'High Volume')
+
+        # Determine color based on emoji or label
         color = "text-gray-600"  # default
-        if '🐋' in part:
-            color = "text-purple-600"
+        if '🐋' in part or 'High Volume' in part:
+            color = "text-green-600"  # Changed from purple to green
         elif '🩸' in part or '🚨' in part:
             color = "text-red-600"
         elif '✅' in part:
@@ -520,9 +547,9 @@ def generate_score_reasoning(row):
         else:
             reasoning['strategy'].append(f"5pts: Revenue ${est_revenue/1_000_000:.1f}M")
     
-    # Whale Scale (Max 15)
+    # High Volume (Max 15)
     if is_verified_volume and vol_metric > 25000:
-        reasoning['strategy'].append(f"15pts: Whale Scale - Verified volume {int(vol_metric):,} > 25k")
+        reasoning['strategy'].append(f"15pts: High Volume - Verified volume {int(vol_metric):,} patients > 25k threshold")
     elif site_count > 5:
         reasoning['strategy'].append(f"10pts: Multi-Site Network ({int(site_count)} sites)")
     else:
@@ -560,9 +587,9 @@ def generate_json():
     # Sort by ICP Score DESC, then Lift Value DESC
     df = df.sort_values(['icp_score', '_lift_value'], ascending=[False, False])
 
-    # Filter: Top 2,500 by ICP Score
-    top_clinics = df.head(2500)
-    print(f"   Selected Top 2,500 leads (scores: {top_clinics['icp_score'].min()}-{top_clinics['icp_score'].max()})")
+    # Filter: Top 5,000 by ICP Score
+    top_clinics = df.head(5000)
+    print(f"   Selected Top 5,000 leads (scores: {top_clinics['icp_score'].min()}-{top_clinics['icp_score'].max()})")
 
     # Transform data
     output_data = []
@@ -624,7 +651,7 @@ def generate_json():
             fit_reason = "Standard opportunity."
 
         # Contact info
-        phone = str(row.get('phone', 'N/A'))
+        phone = format_phone(row.get('phone'))
         address = f"{city.title()}, {state}" if city else state
 
         # ========================================
@@ -639,6 +666,16 @@ def generate_json():
             'data_confidence': str(row.get('data_confidence', 'Unknown'))
         }
 
+        # MIPS and HPSA/MUA data
+        avg_mips_score = row.get('avg_mips_score')
+        mips_clinician_count = row.get('mips_clinician_count')
+        is_hpsa = str(row.get('is_hpsa', '')).lower() == 'true'
+        is_mua = str(row.get('is_mua', '')).lower() == 'true'
+        county_name = str(row.get('county_name', ''))
+
+        # Scoring Track (for transparency)
+        scoring_track = str(row.get('scoring_track', 'AMBULATORY'))
+        
         # Assemble clinic object
         clinic = {
             "id": npi,
@@ -655,6 +692,7 @@ def generate_json():
             "billing_ratio": billing_ratio,
             "primary_driver": primary_driver,
             "drivers": drivers,
+            "scoring_track": scoring_track,  # NEW: Track transparency
             "contact": {
                 "phone": phone,
                 "email": "N/A",
@@ -665,7 +703,12 @@ def generate_json():
                 "raw": {
                     "undercoding_ratio": float(undercoding_ratio) if pd.notna(undercoding_ratio) else None,
                     "volume_source": str(row.get('volume_source', 'Unknown')),
-                    "revenue_source": str(row.get('revenue_source', 'Unknown'))
+                    "revenue_source": str(row.get('revenue_source', 'Unknown')),
+                    "avg_mips_score": float(avg_mips_score) if pd.notna(avg_mips_score) else None,
+                    "mips_clinician_count": int(mips_clinician_count) if pd.notna(mips_clinician_count) else None,
+                    "is_hpsa": is_hpsa,
+                    "is_mua": is_mua,
+                    "county_name": county_name if pd.notna(county_name) and county_name != 'nan' else None
                 }
             },
             "analysis": analysis  # NEW: Glass box insights

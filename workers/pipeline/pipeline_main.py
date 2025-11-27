@@ -223,18 +223,26 @@ def integrate_physician_util(df):
         print(f"   Util Columns before agg: {util_bridged.columns.tolist()}")
         
         # Map columns if needed
+        # The staging file uses 'services_count' and 'allowed_amt'
+        # Legacy raw files use 'line_srvc_cnt' and 'average_Medicare_allowed_amt'
         vol_col = 'line_srvc_cnt'
         rev_col = 'average_Medicare_allowed_amt'
-        
+
         if vol_col not in util_bridged.columns:
-            # Try to find volume column
-            candidates = [c for c in util_bridged.columns if 'srvc' in c.lower() or 'cnt' in c.lower()]
-            if candidates: vol_col = candidates[0]
-            
+            # Try to find volume column (staging file uses 'services_count')
+            if 'services_count' in util_bridged.columns:
+                vol_col = 'services_count'
+            else:
+                candidates = [c for c in util_bridged.columns if 'srvc' in c.lower() or 'service' in c.lower() or 'count' in c.lower()]
+                if candidates: vol_col = candidates[0]
+
         if rev_col not in util_bridged.columns:
-             # Try to find revenue column
-            candidates = [c for c in util_bridged.columns if 'allowed' in c.lower() or 'pymt' in c.lower()]
-            if candidates: rev_col = candidates[0]
+            # Try to find revenue column (staging file uses 'allowed_amt')
+            if 'allowed_amt' in util_bridged.columns:
+                rev_col = 'allowed_amt'
+            else:
+                candidates = [c for c in util_bridged.columns if 'allowed' in c.lower() or 'pymt' in c.lower() or 'amt' in c.lower()]
+                if candidates: rev_col = candidates[0]
             
         print(f"   Aggregating using Volume: {vol_col}, Revenue: {rev_col}")
         
@@ -1212,12 +1220,93 @@ def integrate_uds_volume(df):
 # ============================================================================
 # MAIN PIPELINE
 # ============================================================================
+def enrich_with_zip_and_county(df):
+    """
+    Enrich clinics with ZIP codes from PECOS and derive county names.
+
+    Args:
+        df: DataFrame with 'npi' column
+
+    Returns:
+        DataFrame with added 'zip_code' and 'county_name' columns
+    """
+    print_section("ENRICHING WITH ZIP CODE & COUNTY DATA")
+
+    pecos_practice_file = os.path.join(
+        DATA_RAW, "pecos", "Medicare Fee-For-Service  Public Provider Enrollment",
+        "2025-Q3", "PPEF_Practice_Location_Extract_2025.10.01.csv"
+    )
+    pecos_enroll_file = os.path.join(
+        DATA_RAW, "pecos", "Medicare Fee-For-Service  Public Provider Enrollment",
+        "2025-Q3", "PPEF_Enrollment_Extract_2025.10.01.csv"
+    )
+
+    if not os.path.exists(pecos_practice_file) or not os.path.exists(pecos_enroll_file):
+        print("   ⚠️  PECOS files not found. Skipping ZIP/county enrichment.")
+        df['zip_code'] = None
+        df['county_name'] = None
+        return df
+
+    try:
+        # Load PECOS Enrollment to map ENRLMT_ID -> NPI
+        print("   Loading PECOS Enrollment (ENRLMT_ID -> NPI)...")
+        enroll_df = pd.read_csv(
+            pecos_enroll_file,
+            usecols=['NPI', 'ENRLMT_ID'],
+            dtype={'NPI': 'int64', 'ENRLMT_ID': str},
+            encoding='latin1'
+        )
+        print(f"   Loaded {len(enroll_df):,} enrollment records")
+
+        # Load PECOS Practice Location to get ZIP codes
+        print("   Loading PECOS Practice Locations (ENRLMT_ID -> ZIP)...")
+        practice_df = pd.read_csv(
+            pecos_practice_file,
+            usecols=['ENRLMT_ID', 'ZIP_CD'],
+            dtype={'ENRLMT_ID': str, 'ZIP_CD': str},
+            encoding='latin1'
+        )
+        print(f"   Loaded {len(practice_df):,} practice location records")
+
+        # Merge to get NPI -> ZIP
+        print("   Merging NPI -> ZIP...")
+        npi_zip = enroll_df.merge(practice_df, on='ENRLMT_ID', how='inner')
+
+        # Keep first ZIP per NPI (primary location)
+        npi_zip = npi_zip.drop_duplicates(subset=['NPI'], keep='first')
+        npi_zip = npi_zip[['NPI', 'ZIP_CD']].rename(columns={'NPI': 'npi', 'ZIP_CD': 'zip_code'})
+
+        print(f"   Extracted {len(npi_zip):,} unique NPI -> ZIP mappings")
+
+        # Merge with main dataframe
+        df['npi'] = df['npi'].astype('int64')
+        df = df.merge(npi_zip, on='npi', how='left')
+
+        matched_zip = df['zip_code'].notna().sum()
+        print(f"   ✅ Matched {matched_zip:,} clinics with ZIP codes ({matched_zip/len(df)*100:.1f}%)")
+
+        # Enrich with county data using ZIP codes
+        print("\n   🗺️  Enriching with county data from ZIP codes...")
+        from workers.pipeline.enrich_county_data import enrich_dataframe_with_county
+        df = enrich_dataframe_with_county(df, zip_col='zip_code')
+
+    except Exception as e:
+        print(f"   ❌ Error during ZIP/county enrichment: {e}")
+        df['zip_code'] = None
+        df['county_name'] = None
+
+    return df
+
+
 def run_pipeline():
     print("🚀 STARTING TOTAL DATA CAPTURE PIPELINE")
-    
+
     # 1. Load
     df = load_seed()
     print(f"   Initial Seed Count: {len(df):,}")
+
+    # 1b. Enrich with ZIP and County
+    df = enrich_with_zip_and_county(df)
     
     # 2. Integrate
     df = integrate_physician_util(df)

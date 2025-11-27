@@ -1,32 +1,33 @@
 """
-ICP SCORING ENGINE v10.0 (MIPS + HPSA/MUA INTEGRATION)
+ICP SCORING ENGINE v11.0 (SEGMENTED SCORING TRACKS)
 Author: Charta Health GTM Strategy
 
-CHANGELOG v10.0 (MIPS + HPSA/MUA FEATURES):
+CHANGELOG v11.0 (BEHAVIORAL HEALTH VBC TRACK):
+- **SEGMENTED TRACKS:** Separate scoring logic for different care models
+  * Track A (Ambulatory): E&M undercoding-focused
+  * Track B (Behavioral): VBC readiness + psych complexity
+  * Track C (Post-Acute): Margin-based scoring
+
+**TRACK B (BEHAVIORAL HEALTH) LOGIC:**
+- **Economic Pain (Max 40):**
+  * PRIMARY: Psych Audit Risk (0.75+ → 40pts, 0.50+ → 30pts, else 10-25pts)
+  * SECONDARY: Add-on code density (high 90785 usage → complexity bonus)
+  * IGNORES: E&M undercoding ratio (not relevant for behavioral)
+  
+- **Strategic Fit (Max 30):**
+  * VBC Readiness: MIPS > 80 = tech-ready for collaborative care (5pts)
+  * Segment Alignment: Behavioral Health = core ICP (15pts, up from 10pts)
+  * Complexity: Provider count (logarithmic, max 10pts)
+  
+- **Strategic Value (Max 30):**
+  * Volume: Lower thresholds (10k+ patients = max points vs 25k+ for ambulatory)
+  * Revenue: Adjusted for behavioral economics ($2M+ = strong deal)
+
+GOAL: Clean, compliant behavioral health orgs score 75-85 based on VBC potential.
+
+CHANGELOG v10.0 (MIPS + HPSA/MUA INTEGRATION):
 - **MIPS Score Bonus (Strategic Fit):** +5pts if avg_mips_score > 80 OR < 50
-  * Rewards exceptional quality OR distressed performers
 - **HPSA/MUA Bonus (Strategic Fit):** +5pts if clinic in HPSA or MUA county
-  * Rewards high complexity/fragility payer mix proxy
-- **Total:** Pain (40) + Fit (30) + Value (30) = 100 max
-
-CHANGELOG v9.0 (CONTINUOUS SCORING REFACTOR):
-- **Eliminated discrete bucketing** - All scoring now uses continuous functions
-- **Economic Pain (Max 40):** Linear interpolation for undercoding ratio
-  * Ratio 0.15 (worst) → 40 points
-  * Ratio 0.45 (national avg) → 15 points
-  * Ratio >0.45 → 10 points (floor)
-  * Example: Ratio 0.35 → 27.5 points (not 40→15 jump)
-- **Strategic Fit (Max 30):** Logarithmic scaling for provider count
-  * 5 providers → 2 points
-  * 50 providers → 6 points
-  * Smooth curve between
-- **Strategic Value (Max 30):** Logarithmic scaling for revenue/volume
-  * Rewards incremental size continuously
-  * No more $4.9M vs $5.0M cliffs
-
-CHANGELOG v8.0 (PREVIOUS):
-- STRICT 100-POINT SCALE: No bonuses, no caps
-- Whale Scale integrated into base scoring
 """
 
 import pandas as pd
@@ -59,14 +60,28 @@ def detect_track(row):
     Returns: 'BEHAVIORAL', 'POST_ACUTE', or 'AMBULATORY'
     """
     segment = str(row.get('segment_label', '')).upper()
+    org_name = str(row.get('org_name', '')).upper()
     psych_codes = row.get('total_psych_codes', 0)
     psych_ratio = row.get('psych_risk_ratio', 0)
 
-    # Track B: Behavioral Health
-    if 'BEHAVIORAL' in segment or 'PSYCH' in segment:
+    # Track B: Behavioral Health (VERY CONSERVATIVE - only dedicated behavioral practices)
+    # NOTE: Segment A is "Behavioral/Specialty" - includes many non-behavioral specialties!
+    # Only use name-based detection for true behavioral health organizations
+
+    # 1. Organization name contains behavioral health keywords
+    behavioral_keywords = ['BEHAVIORAL', 'PSYCH', 'MENTAL HEALTH', 'COUNSELING', 'THERAPY']
+    if any(keyword in org_name for keyword in behavioral_keywords):
         return 'BEHAVIORAL'
-    if pd.notnull(psych_codes) and psych_codes > 100:
-        return 'BEHAVIORAL'
+
+    # 2. For Segment A ONLY: Additional check for high psych focus
+    # This catches behavioral practices that don't have keywords in name
+    if 'SEGMENT A' in segment:
+        if pd.notnull(psych_codes) and pd.notnull(psych_ratio):
+            # Very high threshold: >2000 psych codes AND >0.70 ratio
+            if psych_codes > 2000 and psych_ratio > 0.70:
+                return 'BEHAVIORAL'
+
+    # Default: All other Segment A goes to AMBULATORY (they're specialty practices)
 
     # Track C: Post-Acute / Home Health
     if 'HOME HEALTH' in segment or 'HHA' in segment or 'SEGMENT F' in segment:
@@ -107,8 +122,9 @@ def score_psych_risk_continuous(ratio):
 
     Maps:
     - 0.75+ (severe) → 40 points
-    - 0.0 (none) → 10 points
-    - Linear between
+    - 0.50-0.75 (elevated) → 30-40 points
+    - 0.25-0.50 (moderate) → 20-30 points
+    - 0.0-0.25 (low/clean) → 10-20 points
 
     Returns: (score, reasoning_text)
     """
@@ -117,10 +133,63 @@ def score_psych_risk_continuous(ratio):
 
     if ratio >= PSYCH_RISK_SEVERE:
         return 40, f"Severe psych audit risk ({ratio:.3f})"
+    
+    if ratio >= 0.50:
+        # Elevated risk: 30-40 points
+        score = 30 + ((ratio - 0.50) / (PSYCH_RISK_SEVERE - 0.50)) * 10
+        return round(score, 1), f"Elevated psych audit risk ({ratio:.3f})"
+    
+    if ratio >= 0.25:
+        # Moderate risk: 20-30 points
+        score = 20 + ((ratio - 0.25) / 0.25) * 10
+        return round(score, 1), f"Moderate psych complexity ({ratio:.3f})"
 
-    # Linear interpolation: 0.0 → 10 points, 0.75 → 40 points
-    score = 10 + (ratio / PSYCH_RISK_SEVERE) * 30
-    return round(score, 1), f"Psych risk ratio {ratio:.3f}"
+    # Low/clean: 10-20 points (still reward some complexity)
+    score = 10 + (ratio / 0.25) * 10
+    return round(score, 1), f"Low psych risk, clean billing ({ratio:.3f})"
+
+
+def score_behavioral_vbc_readiness(row):
+    """
+    Score behavioral health organizations on Value-Based Care readiness.
+    
+    Factors:
+    - MIPS > 80: Tech-ready for CoCM/BHI codes (collaborative care)
+    - ACO participation: Already in VBC model
+    - Provider count: Capacity for integration
+    - HPSA/MUA: Complex patient population (VBC opportunity)
+    
+    Returns: (score, reasoning_list)
+    """
+    score = 0
+    reasoning = []
+    
+    # MIPS Quality Score (indicator of EHR sophistication)
+    avg_mips = row.get('avg_mips_score', None)
+    if pd.notna(avg_mips) and avg_mips > 80:
+        score += 5
+        reasoning.append(f"MIPS {avg_mips:.1f} = VBC-ready tech infrastructure")
+    elif pd.notna(avg_mips) and avg_mips >= 60:
+        score += 3
+        reasoning.append(f"MIPS {avg_mips:.1f} = moderate tech readiness")
+    
+    # ACO Participation
+    is_aco = str(row.get('is_aco_participant', '')).lower() == 'true'
+    if is_aco:
+        score += 5
+        reasoning.append("ACO participant = VBC experience")
+    
+    # HPSA/MUA (complex populations benefit most from BHI)
+    is_hpsa = str(row.get('is_hpsa', 'False')).lower() == 'true'
+    is_mua = str(row.get('is_mua', 'False')).lower() == 'true'
+    if is_hpsa or is_mua:
+        score += 5
+        designation = []
+        if is_hpsa: designation.append("HPSA")
+        if is_mua: designation.append("MUA")
+        reasoning.append(f"{'/'.join(designation)} = complex population, BHI opportunity")
+    
+    return min(score, 15), reasoning  # Cap at 15 for VBC readiness
 
 def score_provider_count_continuous(npi_count):
     """
@@ -194,7 +263,7 @@ def score_revenue_continuous(revenue, segment):
 
 def score_volume_continuous(volume, is_verified):
     """
-    Continuous scoring for volume/scale.
+    Continuous scoring for volume/scale (AMBULATORY track).
 
     Verified volume:
     - 1k → 3 points
@@ -223,6 +292,44 @@ def score_volume_continuous(volume, is_verified):
     log_min = math.log(1_000)
     log_max = math.log(50_000)
 
+    score = 3 + ((log_volume - log_min) / (log_max - log_min)) * (max_score - 3)
+    return round(min(max_score, max(3, score)), 1)
+
+
+def score_behavioral_volume_continuous(volume, is_verified):
+    """
+    Behavioral health volume scoring with LOWER thresholds.
+    
+    Behavioral health practices have lower visit volumes than primary care
+    because therapy sessions are longer and capacity is lower.
+    
+    Verified volume:
+    - 500 → 3 points
+    - 5k → 8 points
+    - 10k → 12 points
+    - 20k+ → 15 points
+    
+    Unverified:
+    - Cap at 10 points
+    
+    Returns: score (float)
+    """
+    if pd.isna(volume) or volume <= 0:
+        return 3  # Minimum
+    
+    max_score = 15 if is_verified else 10
+    
+    if volume >= 20_000:
+        return max_score
+    
+    if volume <= 500:
+        return 3
+    
+    # Logarithmic scale adjusted for behavioral health thresholds
+    log_volume = math.log(volume)
+    log_min = math.log(500)
+    log_max = math.log(20_000)
+    
     score = 3 + ((log_volume - log_min) / (log_max - log_min)) * (max_score - 3)
     return round(min(max_score, max(3, score)), 1)
 
@@ -277,10 +384,24 @@ def calculate_row_score(row):
     # PHASE 1: ECONOMIC PAIN (MAX 40 POINTS) - CONTINUOUS
     # ========================================
     if track == 'BEHAVIORAL':
+        # Track B: Behavioral Health Pain = VBC Opportunity + Complexity
+        # PRIMARY: Psych audit risk (measures complexity/billing intensity)
         pain, reason = score_psych_risk_continuous(psych_risk)
         pain_reasoning.append(f"+{pain:.1f}pts: {reason}")
-        if pain >= 30:
-            confidence += 50
+        
+        # SECONDARY: Add-on code density bonus (if we detect high 90785 usage)
+        # This rewards practices doing complex therapy (high documentation opportunity)
+        total_psych = row.get('total_psych_codes', 0)
+        if pd.notna(total_psych) and total_psych > 500:
+            # High volume psych practice = documentation/billing sophistication opportunity
+            addon_bonus = min(5, (total_psych / 1000) * 5)
+            pain += addon_bonus
+            pain = min(40, pain)  # Cap at 40
+            pain_reasoning.append(f"+{addon_bonus:.1f}pts: High psych volume ({int(total_psych)} codes) = documentation lift")
+        
+        # Confidence boost if we have strong psych data
+        if pain >= 20:
+            confidence += 40
 
     elif track == 'POST_ACUTE':
         # Post-Acute: Margin-based (simplified for now, could be continuous too)
@@ -309,82 +430,148 @@ def calculate_row_score(row):
             confidence += 50
 
     # ========================================
-    # PHASE 2: STRATEGIC FIT (MAX 30 POINTS) - CONTINUOUS
+    # PHASE 2: STRATEGIC FIT (MAX 30 POINTS) - SEGMENTED
     # ========================================
-
-    # Alignment (Max 15): Based on segment priority
-    segment_alignment_scores = {
-        'Segment B': 15,  # FQHC (Core ICP)
-        'Segment D': 15,  # Urgent Care
-        'Segment E': 10,  # Primary Care
-        'Segment A': 10,  # Behavioral/Specialty
-        'Segment C': 8,   # Hospitals
-        'Segment F': 5,   # Other
-    }
-    s2_align = segment_alignment_scores.get(segment, 5)
-    fit_reasoning.append(f"+{s2_align}pts: {segment} alignment")
-
-    # Complexity (Max 10): Continuous provider count scoring
-    s2_complex = score_provider_count_continuous(npi_count)
-    if s2_complex > 0:
-        fit_reasoning.append(f"+{s2_complex:.1f}pts: {int(npi_count)} providers")
-
-    # Tech/Risk (Max 5): ACO or OIG risk flag
+    
+    # Initialize variables for all tracks
+    s2_align = 0
+    s2_complex = 0
     s2_tech_risk = 0
-    if is_aco:
-        s2_tech_risk += 3
-        fit_reasoning.append("+3pts: ACO participant")
-    if is_risk:
-        s2_tech_risk += 2
-        fit_reasoning.append("+2pts: Compliance flag")
-
-    # MIPS Score Bonus (Max 5): Reward exceptional quality OR distressed performers
     s2_mips = 0
-    avg_mips_score = row.get('avg_mips_score', None)
-    if pd.notna(avg_mips_score):
-        if avg_mips_score > 80:
-            s2_mips = 5
-            fit_reasoning.append(f"+5pts: High MIPS quality ({avg_mips_score:.1f})")
-        elif avg_mips_score < 50:
-            s2_mips = 5
-            fit_reasoning.append(f"+5pts: Distressed MIPS performer ({avg_mips_score:.1f})")
-
-    # HPSA/MUA Bonus (Max 5): Payer mix proxy for complexity/fragility
     s2_hpsa_mua = 0
-    is_hpsa = str(row.get('is_hpsa', 'False')).lower() == 'true'
-    is_mua = str(row.get('is_mua', 'False')).lower() == 'true'
-    if is_hpsa or is_mua:
-        s2_hpsa_mua = 5
-        designation = []
-        if is_hpsa: designation.append("HPSA")
-        if is_mua: designation.append("MUA")
-        fit_reasoning.append(f"+5pts: {'/'.join(designation)} designated area")
+    
+    if track == 'BEHAVIORAL':
+        # Track B: Behavioral Health Fit = VBC Readiness + Segment Alignment
+        
+        # Segment Alignment (15 pts): Behavioral is CORE ICP
+        s2_align = 15
+        fit_reasoning.append(f"+15pts: Behavioral Health - Core ICP segment")
+        
+        # VBC Readiness (Max 15 pts): MIPS + ACO + HPSA/MUA
+        vbc_score, vbc_reasons = score_behavioral_vbc_readiness(row)
+        for reason in vbc_reasons:
+            fit_reasoning.append(reason)
+        
+        # Complexity (bonus, not core): Provider count adds operational capacity
+        s2_complex = score_provider_count_continuous(npi_count)
+        if s2_complex > 0:
+            fit_reasoning.append(f"+{s2_complex:.1f}pts: {int(npi_count)} providers (operational capacity)")
+        
+        fit = round(s2_align + vbc_score + min(s2_complex, 5), 1)  # Cap complexity at 5 for behavioral
+        
+    else:
+        # Track A (Ambulatory) / Track C (Post-Acute): Original Logic
+        
+        # Alignment (Max 15): Based on segment priority
+        segment_alignment_scores = {
+            'Segment B': 15,  # FQHC (Core ICP)
+            'Segment D': 15,  # Urgent Care
+            'Segment E': 10,  # Primary Care
+            'Segment A': 10,  # Behavioral/Specialty (fallback if not detected as behavioral)
+            'Segment C': 8,   # Hospitals
+            'Segment F': 5,   # Other
+        }
+        s2_align = segment_alignment_scores.get(segment, 5)
+        fit_reasoning.append(f"+{s2_align}pts: {segment} alignment")
 
-    fit = round(s2_align + s2_complex + s2_tech_risk + s2_mips + s2_hpsa_mua, 1)
+        # Complexity (Max 10): Continuous provider count scoring
+        s2_complex = score_provider_count_continuous(npi_count)
+        if s2_complex > 0:
+            fit_reasoning.append(f"+{s2_complex:.1f}pts: {int(npi_count)} providers")
+
+        # Tech/Risk (Max 5): ACO or OIG risk flag
+        s2_tech_risk = 0
+        if is_aco:
+            s2_tech_risk += 3
+            fit_reasoning.append("+3pts: ACO participant")
+        if is_risk:
+            s2_tech_risk += 2
+            fit_reasoning.append("+2pts: Compliance flag")
+
+        # MIPS Score Bonus (Max 5): Reward exceptional quality OR distressed performers
+        s2_mips = 0
+        avg_mips_score = row.get('avg_mips_score', None)
+        if pd.notna(avg_mips_score):
+            if avg_mips_score > 80:
+                s2_mips = 5
+                fit_reasoning.append(f"+5pts: High MIPS quality ({avg_mips_score:.1f})")
+            elif avg_mips_score < 50:
+                s2_mips = 5
+                fit_reasoning.append(f"+5pts: Distressed MIPS performer ({avg_mips_score:.1f})")
+
+        # HPSA/MUA Bonus (Max 5): Payer mix proxy for complexity/fragility
+        s2_hpsa_mua = 0
+        is_hpsa = str(row.get('is_hpsa', 'False')).lower() == 'true'
+        is_mua = str(row.get('is_mua', 'False')).lower() == 'true'
+        if is_hpsa or is_mua:
+            s2_hpsa_mua = 5
+            designation = []
+            if is_hpsa: designation.append("HPSA")
+            if is_mua: designation.append("MUA")
+            fit_reasoning.append(f"+5pts: {'/'.join(designation)} designated area")
+
+        fit = round(s2_align + s2_complex + s2_tech_risk + s2_mips + s2_hpsa_mua, 1)
 
     # ========================================
-    # PHASE 3: STRATEGIC VALUE (MAX 30 POINTS) - CONTINUOUS
+    # PHASE 3: STRATEGIC VALUE (MAX 30 POINTS) - SEGMENTED
     # ========================================
-
-    # Revenue Score (Max 15) - CONTINUOUS
-    # Estimate revenue if missing
-    if segment == 'Segment B':
-        est_rev = real_revenue if pd.notnull(real_revenue) else (vol_metric * 300)
+    
+    if track == 'BEHAVIORAL':
+        # Track B: Behavioral Health Value = Revenue + Volume (lower thresholds)
+        
+        # Revenue Score (Max 15) - Use behavioral economics
+        # Estimate: ~$150-200 per visit for therapy
+        est_rev = real_revenue if pd.notnull(real_revenue) else (vol_metric * 150)
+        
+        # Behavioral revenue thresholds (lower than ambulatory)
+        if pd.isna(est_rev) or est_rev <= 0:
+            s3_revenue = 2
+        elif est_rev >= 5_000_000:
+            s3_revenue = 15
+        elif est_rev <= 250_000:
+            s3_revenue = 2
+        else:
+            # Logarithmic scale: $250k→2pts, $2M→10pts, $5M→15pts
+            log_revenue = math.log(est_rev)
+            log_min = math.log(250_000)
+            log_max = math.log(5_000_000)
+            s3_revenue = 2 + ((log_revenue - log_min) / (log_max - log_min)) * 13
+            s3_revenue = round(min(15, max(2, s3_revenue)), 1)
+        
+        strategy_reasoning.append(f"+{s3_revenue:.1f}pts: ${est_rev/1_000_000:.2f}M revenue (behavioral health economics)")
+        
+        # Volume Score (Max 15) - BEHAVIORAL-SPECIFIC thresholds
+        s3_volume = score_behavioral_volume_continuous(vol_metric, is_verified_volume)
+        if vol_metric > 0:
+            verified_label = "verified" if is_verified_volume else "estimated"
+            strategy_reasoning.append(f"+{s3_volume:.1f}pts: {int(vol_metric):,} {verified_label} volume (behavioral thresholds)")
+        else:
+            strategy_reasoning.append(f"+{s3_volume:.1f}pts: No volume data")
+        
+        strat = round(s3_revenue + s3_volume, 1)
+        
     else:
-        est_rev = real_revenue if pd.notnull(real_revenue) else (vol_metric * 100)
+        # Track A (Ambulatory) / Track C (Post-Acute): Original Logic
+        
+        # Revenue Score (Max 15) - CONTINUOUS
+        # Estimate revenue if missing
+        if segment == 'Segment B':
+            est_rev = real_revenue if pd.notnull(real_revenue) else (vol_metric * 300)
+        else:
+            est_rev = real_revenue if pd.notnull(real_revenue) else (vol_metric * 100)
 
-    s3_revenue = score_revenue_continuous(est_rev, segment)
-    strategy_reasoning.append(f"+{s3_revenue:.1f}pts: ${est_rev/1_000_000:.2f}M revenue")
+        s3_revenue = score_revenue_continuous(est_rev, segment)
+        strategy_reasoning.append(f"+{s3_revenue:.1f}pts: ${est_rev/1_000_000:.2f}M revenue")
 
-    # Volume/Scale Score (Max 15) - CONTINUOUS
-    s3_volume = score_volume_continuous(vol_metric, is_verified_volume)
-    if vol_metric > 0:
-        verified_label = "verified" if is_verified_volume else "estimated"
-        strategy_reasoning.append(f"+{s3_volume:.1f}pts: {int(vol_metric):,} {verified_label} volume")
-    else:
-        strategy_reasoning.append(f"+{s3_volume:.1f}pts: No volume data")
+        # Volume/Scale Score (Max 15) - CONTINUOUS
+        s3_volume = score_volume_continuous(vol_metric, is_verified_volume)
+        if vol_metric > 0:
+            verified_label = "verified" if is_verified_volume else "estimated"
+            strategy_reasoning.append(f"+{s3_volume:.1f}pts: {int(vol_metric):,} {verified_label} volume")
+        else:
+            strategy_reasoning.append(f"+{s3_volume:.1f}pts: No volume data")
 
-    strat = round(s3_revenue + s3_volume, 1)
+        strat = round(s3_revenue + s3_volume, 1)
 
     # ========================================
     # TOTALS (STRICT 100-POINT MAX)
@@ -420,12 +607,14 @@ def calculate_row_score(row):
     if s2_align >= 15:
         if segment == 'Segment B':
             drivers.append("FQHC - Core ICP")
-        else:
+        elif segment == 'Segment D':
             drivers.append("Urgent Care - High Fit")
+    elif track == 'BEHAVIORAL':
+        drivers.append("Behavioral Health - Core ICP")
 
     # Value Drivers
     if s3_volume >= 12:
-        drivers.append(f"🐋 Whale Scale ({int(vol_metric/1000)}k volume)")
+        drivers.append(f"High Volume ({int(vol_metric/1000)}k patients)")
     elif site_count > 5:
         drivers.append(f"Multi-Site Network ({int(site_count)} sites)")
 
@@ -540,31 +729,55 @@ def main():
         df['avg_mips_score'] = None
         df['mips_clinician_count'] = None
 
-    # Load HPSA/MUA staging data
+    # Load HPSA/MUA staging data with county-level matching
     if os.path.exists(HPSA_MUA_STAGING):
         print(f"📥 Loading HPSA/MUA data from {HPSA_MUA_STAGING}...")
         hpsa_mua_df = pd.read_csv(HPSA_MUA_STAGING)
-        # Normalize state and county for matching
-        df['state_norm'] = df['state_code'].str.upper().str.strip()
-        df['county_norm'] = df['county'].str.strip().str.title()
-        hpsa_mua_df['state_norm'] = hpsa_mua_df['state'].str.upper().str.strip()
-        hpsa_mua_df['county_norm'] = hpsa_mua_df['county_name'].str.strip().str.title()
 
-        df = df.merge(
-            hpsa_mua_df[['state_norm', 'county_norm', 'is_hpsa', 'is_mua']],
-            on=['state_norm', 'county_norm'],
-            how='left'
-        )
-        df.drop(columns=['state_norm', 'county_norm'], inplace=True)
+        # Check if county_name column exists in clinics data
+        has_county_data = 'county_name' in df.columns and df['county_name'].notna().sum() > 0
 
-        # Fill missing values with False
-        df['is_hpsa'] = df['is_hpsa'].fillna(False)
-        df['is_mua'] = df['is_mua'].fillna(False)
+        if has_county_data:
+            print(f"   ✅ County data available - using county-level matching")
 
-        matched_hpsa = df['is_hpsa'].sum()
-        matched_mua = df['is_mua'].sum()
-        print(f"   ✅ Matched {matched_hpsa:,} clinics in HPSA areas")
-        print(f"   ✅ Matched {matched_mua:,} clinics in MUA areas")
+            # Normalize for matching
+            df['state_norm'] = df['state_code'].str.upper().str.strip()
+            df['county_norm'] = df['county_name'].str.strip().str.title()
+            hpsa_mua_df['state_norm'] = hpsa_mua_df['state'].str.upper().str.strip()
+            hpsa_mua_df['county_norm'] = hpsa_mua_df['county_name'].str.strip().str.title()
+
+            # Merge on state + county
+            df = df.merge(
+                hpsa_mua_df[['state_norm', 'county_norm', 'is_hpsa', 'is_mua']],
+                on=['state_norm', 'county_norm'],
+                how='left'
+            )
+
+            # Drop temporary columns
+            df.drop(columns=['state_norm', 'county_norm'], inplace=True)
+
+            # Fill missing values with False
+            df['is_hpsa'] = df['is_hpsa'].fillna(False).astype(bool)
+            df['is_mua'] = df['is_mua'].fillna(False).astype(bool)
+
+            matched_hpsa = df['is_hpsa'].sum()
+            matched_mua = df['is_mua'].sum()
+            print(f"   ✅ Matched {matched_hpsa:,} clinics in HPSA counties")
+            print(f"   ✅ Matched {matched_mua:,} clinics in MUA counties")
+        else:
+            print(f"   ⚠️  No county data available - using state-level fallback")
+
+            # Fallback to state-level matching
+            hpsa_states = set(hpsa_mua_df[hpsa_mua_df['is_hpsa']]['state'].unique())
+            mua_states = set(hpsa_mua_df[hpsa_mua_df['is_mua']]['state'].unique())
+
+            df['is_hpsa'] = df['state_code'].isin(hpsa_states)
+            df['is_mua'] = df['state_code'].isin(mua_states)
+
+            matched_hpsa = df['is_hpsa'].sum()
+            matched_mua = df['is_mua'].sum()
+            print(f"   ✅ Marked {matched_hpsa:,} clinics in HPSA states")
+            print(f"   ✅ Marked {matched_mua:,} clinics in MUA states")
     else:
         print(f"   ⚠️  HPSA/MUA staging file not found. Skipping HPSA/MUA scoring.")
         df['is_hpsa'] = False

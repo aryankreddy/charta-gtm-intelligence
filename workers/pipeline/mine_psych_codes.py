@@ -8,7 +8,7 @@ Target Codes (Comprehensive Behavioral Health Set):
 - 90791: Psychiatric diagnostic evaluation
 - 90792: Psychiatric diagnostic evaluation with medical services
 - 90832: Psychotherapy, 30 min
-- 90833: Psychotherapy, 30 min with E/M
+- 90833: Psychotherapy, 30 min with E/MIK
 - 90834: Psychotherapy, 45 min
 - 90836: Psychotherapy, 45 min with E/M
 - 90837: Psychotherapy, 60 min (High Scrutiny)
