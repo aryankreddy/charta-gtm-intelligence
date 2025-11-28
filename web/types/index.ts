@@ -21,6 +21,7 @@ export interface Clinic {
     color: string;
   }[];
   scoring_track: string;  // NEW: AMBULATORY, BEHAVIORAL, POST_ACUTE
+  pain_label?: string;  // Dynamic pain driver label (e.g., "Undercoding Pain", "Margin Pressure")
   // The "Glass Box" Data
   analysis: {
     strategic_brief: string;  // Analyst report (not sales pitch)

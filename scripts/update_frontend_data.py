@@ -684,7 +684,10 @@ def generate_json():
 
         # Scoring Track (for transparency)
         scoring_track = str(row.get('scoring_track', 'AMBULATORY'))
-        
+
+        # Dynamic Pain Label (NEW)
+        pain_label = str(row.get('pain_label', 'Economic Pain'))
+
         # Assemble clinic object
         clinic = {
             "id": npi,
@@ -702,6 +705,7 @@ def generate_json():
             "primary_driver": primary_driver,
             "drivers": drivers,
             "scoring_track": scoring_track,  # NEW: Track transparency
+            "pain_label": pain_label,  # NEW: Dynamic pain driver label
             "contact": {
                 "phone": phone,
                 "email": "N/A",

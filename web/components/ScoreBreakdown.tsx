@@ -13,33 +13,63 @@ export function ScoreBreakdown({ clinic }: ScoreBreakdownProps) {
   const fitScore = clinic.analysis.raw_scores.fit.total;
   const strategyScore = clinic.analysis.raw_scores.strategy.total;
   const track = clinic.scoring_track || 'AMBULATORY';
-  
-  // Track-specific configuration
-  const getTrackConfig = () => {
-    if (track === 'BEHAVIORAL') {
+
+  // Helper to get pain description based on pain label
+  const getPainDescription = (painLabel: string) => {
+    // Map pain labels to descriptions
+    if (painLabel.includes('Therapy Undercoding')) {
       return {
-        label: 'Behavioral Health',
-        painLabel: 'Economic Pain (Audit Risk)',
-        painDescription: 'Value-based care readiness, therapy complexity, and documentation sophistication opportunities measured via psych audit risk patterns.',
-        painMatters: 'Behavioral health organizations with high therapy volume and clean compliance are VBC-ready candidates for collaborative care models (CoCM) and behavioral health integration (BHI) codes. Audit risk indicates billing intensity and documentation complexity.'
+        description: 'Conservative therapy coding patterns indicating potential revenue recovery opportunities from undercoded behavioral health sessions.',
+        matters: 'Organizations coding therapy conservatively (low % of high-complexity sessions) may have documentation supporting higher reimbursement. Similar to E&M undercoding, this represents verified revenue on the table.'
       };
     }
-    if (track === 'POST_ACUTE') {
+    if (painLabel.includes('Audit Risk') || painLabel.includes('Therapy Audit Risk')) {
       return {
-        label: 'Post-Acute',
-        painLabel: 'Economic Pain (Margin Pressure)',
-        painDescription: 'Operating margin analysis and financial sustainability risks.',
-        painMatters: 'Post-acute organizations with margin compression are motivated buyers seeking operational efficiency and better reimbursement capture.'
+        description: 'Aggressive therapy coding patterns creating compliance exposure and potential recoupment risk.',
+        matters: 'Organizations with high % of max-complexity therapy sessions face audit scrutiny from payers. Risk mitigation and compliance protection are primary value propositions.'
       };
     }
+    if (painLabel.includes('Margin Pressure')) {
+      return {
+        description: 'Operating margin analysis and financial sustainability risks.',
+        matters: 'Post-acute organizations with margin compression are motivated buyers seeking operational efficiency and better reimbursement capture.'
+      };
+    }
+    if (painLabel.includes('Undercoding')) {
+      return {
+        description: 'Revenue recovery opportunities from E&M undercoding and compliance risks.',
+        matters: 'Higher pain = immediate ROI for AI chart review. Organizations with coding gaps or audit exposure are motivated buyers. Revenue leakage is measured via undercoding ratio (% of Level 4/5 E&M codes vs national benchmark).'
+      };
+    }
+    // Default fallback
     return {
-      label: 'Ambulatory',
-      painLabel: 'Economic Pain (Revenue Leakage)',
-      painDescription: 'Revenue recovery opportunities from E&M undercoding and compliance risks.',
-      painMatters: 'Higher pain = immediate ROI for AI chart review. Organizations with coding gaps or audit exposure are motivated buyers. Revenue leakage is measured via undercoding ratio (% of Level 4/5 E&M codes vs national benchmark).'
+      description: 'Economic pain signals indicating revenue optimization or compliance opportunities.',
+      matters: 'Organizations with higher pain scores represent motivated buyers with clear ROI pathways.'
     };
   };
-  
+
+  // Track-specific configuration
+  const getTrackConfig = () => {
+    // Use dynamic pain_label if available, otherwise fall back to track-based defaults
+    const painLabel = clinic.pain_label ||
+      (track === 'BEHAVIORAL' ? 'Economic Pain (Audit Risk)' :
+       track === 'POST_ACUTE' ? 'Economic Pain (Margin Pressure)' :
+       'Economic Pain (Revenue Leakage)');
+
+    const painDesc = getPainDescription(painLabel);
+
+    const trackLabel = track === 'BEHAVIORAL' ? 'Behavioral Health' :
+                       track === 'POST_ACUTE' ? 'Post-Acute' :
+                       'Ambulatory';
+
+    return {
+      label: trackLabel,
+      painLabel: painLabel,
+      painDescription: painDesc.description,
+      painMatters: painDesc.matters
+    };
+  };
+
   const trackConfig = getTrackConfig();
 
   const getPainTooltip = () => {

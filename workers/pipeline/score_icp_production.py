@@ -444,10 +444,29 @@ def calculate_row_score(row):
             pain = 10
             pain_reasoning.append("+10pts: No margin data")
 
-    else:  # AMBULATORY (Default) - CONTINUOUS
-        pain, reason = score_undercoding_continuous(undercoding)
-        pain_reasoning.append(f"+{pain:.1f}pts: {reason}")
-        if pain >= 30 and undercoding > 0:
+    else:  # AMBULATORY (Default) - DUAL SCORING
+        # PRIMARY: Undercoding (E&M complexity)
+        pain_undercoding, reason_undercoding = score_undercoding_continuous(undercoding)
+
+        # SECONDARY: Therapy coding (if organization has behavioral services)
+        pain_therapy = 0
+        reason_therapy = ""
+        if pd.notnull(psych_risk) and psych_risk > 0:
+            pain_therapy, reason_therapy = score_psych_risk_continuous(psych_risk)
+
+        # USE WHICHEVER PAIN SIGNAL IS HIGHER
+        if pain_therapy > pain_undercoding:
+            pain = pain_therapy
+            pain_reasoning.append(f"+{pain:.1f}pts: {reason_therapy} (therapy coding dominates)")
+            pain_reasoning.append(f"  (Alternative: {pain_undercoding:.1f}pts E&M undercoding)")
+        else:
+            pain = pain_undercoding
+            pain_reasoning.append(f"+{pain:.1f}pts: {reason_undercoding}")
+            if pain_therapy > 10:  # Only mention if therapy signal exists
+                pain_reasoning.append(f"  (Secondary: {pain_therapy:.1f}pts therapy coding)")
+
+        # Confidence boost if either signal is strong
+        if pain >= 30:
             confidence += 50
 
     # ========================================
@@ -610,19 +629,59 @@ def calculate_row_score(row):
     # ========================================
     drivers = []
 
-    # Pain Driver
-    if pain >= 35:
-        if track == 'BEHAVIORAL':
-            drivers.append(f"🚨 SEVERE Psych Risk ({psych_risk:.2f})")
+    # Pain Driver - DYNAMIC BASED ON SIGNAL TYPE
+    if track == 'BEHAVIORAL':
+        # Behavioral track: Bidirectional therapy coding
+        if pain >= 25:
+            if psych_risk <= 0.30:
+                drivers.append(f"💰 Therapy Undercoding ({psych_risk:.2f})")
+            elif psych_risk >= 0.75:
+                drivers.append(f"🚨 Compliance/Audit Risk ({psych_risk:.2f})")
+            else:
+                drivers.append(f"Therapy Coding Risk ({psych_risk:.2f})")
         else:
-            drivers.append(f"🩸 SEVERE Undercoding ({undercoding:.2f})")
-    elif pain >= 25:
-        if track == 'BEHAVIORAL':
-            drivers.append(f"Psych Track: Audit Risk ({psych_risk:.2f})")
+            drivers.append(f"{track} Track: Benchmark")
+
+    elif track == 'POST_ACUTE':
+        # Post-acute track: Margin pressure
+        if pain >= 25:
+            real_margin = row.get('net_margin')
+            if pd.notna(real_margin):
+                if real_margin < 0:
+                    drivers.append(f"Financial Distress (margin {real_margin:.1%})")
+                else:
+                    drivers.append(f"Margin Pressure (margin {real_margin:.1%})")
+            else:
+                drivers.append(f"Margin Pressure")
         else:
-            drivers.append(f"Primary Track: Undercoding ({undercoding:.2f})")
-    else:
-        drivers.append(f"{track} Track: Benchmark")
+            drivers.append(f"{track} Track: Benchmark")
+
+    else:  # AMBULATORY
+        # Ambulatory track: Dual scoring - check which signal dominates
+        if pain >= 25:
+            dominant_signal = "undercoding"  # default
+            if pd.notnull(psych_risk) and psych_risk > 0:
+                pain_therapy_check, _ = score_psych_risk_continuous(psych_risk)
+                pain_undercoding_check, _ = score_undercoding_continuous(undercoding)
+                if pain_therapy_check > pain_undercoding_check:
+                    dominant_signal = "therapy"
+
+            if dominant_signal == "therapy":
+                # Therapy coding is the dominant pain
+                if psych_risk <= 0.30:
+                    drivers.append(f"💰 Therapy Undercoding ({psych_risk:.2f})")
+                elif psych_risk >= 0.75:
+                    drivers.append(f"🚨 Therapy Audit Risk ({psych_risk:.2f})")
+                else:
+                    drivers.append(f"Therapy Coding Risk ({psych_risk:.2f})")
+            else:
+                # E&M undercoding is dominant
+                if pain >= 35:
+                    drivers.append(f"🩸 SEVERE Undercoding ({undercoding:.2f})")
+                else:
+                    drivers.append(f"E&M Undercoding ({undercoding:.2f})")
+        else:
+            drivers.append(f"{track} Track: Benchmark")
 
     # Fit Driver
     if s2_align >= 15:
@@ -649,12 +708,44 @@ def calculate_row_score(row):
         drivers.append("ACO Participant")
 
     # ========================================
+    # DYNAMIC PAIN LABEL GENERATION
+    # ========================================
+    pain_label = "Economic Pain"  # default fallback
+
+    if track == 'BEHAVIORAL':
+        if psych_risk <= 0.30:
+            pain_label = "Therapy Undercoding Pain"
+        elif psych_risk >= 0.75:
+            pain_label = "Audit Risk Pain"
+        else:
+            pain_label = "Therapy Coding Risk"
+    elif track == 'POST_ACUTE':
+        pain_label = "Margin Pressure"
+    else:  # AMBULATORY
+        # Check which signal dominates
+        if pd.notnull(psych_risk) and psych_risk > 0:
+            pain_therapy_check, _ = score_psych_risk_continuous(psych_risk)
+            pain_undercoding_check, _ = score_undercoding_continuous(undercoding)
+            if pain_therapy_check > pain_undercoding_check:
+                if psych_risk <= 0.30:
+                    pain_label = "Therapy Undercoding Pain"
+                elif psych_risk >= 0.75:
+                    pain_label = "Therapy Audit Risk"
+                else:
+                    pain_label = "Therapy Coding Risk"
+            else:
+                pain_label = "Undercoding Pain"
+        else:
+            pain_label = "Undercoding Pain"
+
+    # ========================================
     # RETURN STRUCTURE
     # ========================================
     return {
         'icp_score': min(100, total),  # Cap at 100
         'icp_tier': tier,
         'scoring_track': track,
+        'pain_label': pain_label,  # NEW: Dynamic pain driver label
         'data_confidence': min(100, confidence),
         'scoring_drivers': " | ".join(drivers) if drivers else "Standard",
 
