@@ -178,23 +178,39 @@ def classify_segment(clinic_data: Dict[str, Any]) -> str:
     site_count = safe_int(clinic_data.get("site_count", 0))
     
     # ========================================================================
-    # PRIORITY 1: SEGMENT B (FQHC/HRSA)
+    # PRIORITY 0: HOSPITAL OVERRIDE (Prevent hospitals from being FQHCs)
     # ========================================================================
-    
-    # Check FQHC flag
-    if fqhc_flag >= 1:
-        return "B"
-    
-    # Check taxonomy codes
-    for code in taxonomy_codes:
-        if code in SEGMENT_B_TAXONOMY_CODES:
+    # CRITICAL FIX: Some organizations have fqhc_flag = 1 incorrectly
+    # Hospitals/Medical Centers should NEVER be Segment B, even with bad flags
+
+    HOSPITAL_OVERRIDE_KEYWORDS = {
+        "hospital",
+        "medical center",
+        "health system",
+        "hospital district"
+    }
+    if contains_keywords(org_name, HOSPITAL_OVERRIDE_KEYWORDS):
+        # Skip FQHC checks, will be classified as Segment C later
+        pass
+    else:
+        # ====================================================================
+        # PRIORITY 1: SEGMENT B (FQHC/HRSA)
+        # ====================================================================
+
+        # Check FQHC flag
+        if fqhc_flag >= 1:
             return "B"
-    
-    # Check keywords in segment_label or org_name
-    if contains_keywords(segment_label, SEGMENT_B_KEYWORDS):
-        return "B"
-    if contains_keywords(org_name, SEGMENT_B_KEYWORDS):
-        return "B"
+
+        # Check taxonomy codes
+        for code in taxonomy_codes:
+            if code in SEGMENT_B_TAXONOMY_CODES:
+                return "B"
+
+        # Check keywords in segment_label or org_name
+        if contains_keywords(segment_label, SEGMENT_B_KEYWORDS):
+            return "B"
+        if contains_keywords(org_name, SEGMENT_B_KEYWORDS):
+            return "B"
     
     # ========================================================================
     # PRIORITY 2: SEGMENT A (SPECIALTY/BEHAVIORAL)

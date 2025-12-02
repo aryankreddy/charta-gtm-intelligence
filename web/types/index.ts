@@ -7,9 +7,17 @@ export interface Clinic {
   state: string;
   revenue: string;
   volume: string;
+  volume_unit: string;  // "patients" or "encounters" - critical for accurate labeling
   est_revenue_lift: string;
   is_projected_lift: boolean;
   lift_basis: string;
+  opportunity_breakdown?: {
+    total: string;                 // Formatted total (e.g., "$2.5M")
+    coding_lift: string;           // Formatted coding lift
+    denial_prevention: string;     // Formatted denial prevention
+    payer_mix_applied: boolean;    // True if FQHC discount applied
+    winning_status: string;        // "WINNING" | "OPPORTUNITY" | "UNKNOWN"
+  };
   billing_ratio: {
     level3: number;
     level4: number;
@@ -85,6 +93,7 @@ export interface Clinic {
     raw: {
       undercoding_ratio: number | null;
       volume_source: string;
+      volume_unit: string;  // "patients" or "encounters"
       revenue_source: string;
       avg_mips_score: number | null;
       mips_clinician_count: number | null;

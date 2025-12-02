@@ -14,6 +14,13 @@ export function ScoreBreakdown({ clinic }: ScoreBreakdownProps) {
   const strategyScore = clinic.analysis.raw_scores.strategy.total;
   const track = clinic.scoring_track || 'AMBULATORY';
 
+  // Calculate Fit bonuses (MIPS + HPSA/MUA can add up to +10 pts beyond base 30)
+  const fitBase = clinic.analysis.raw_scores.fit.alignment +
+                  clinic.analysis.raw_scores.fit.complexity +
+                  clinic.analysis.raw_scores.fit.risk;
+  const fitBonus = fitScore - fitBase;
+  const hasFitBonus = fitBonus > 0.1; // Only show if bonus > 0.1 to avoid floating point issues
+
   // Helper to get pain description based on pain label
   const getPainDescription = (painLabel: string) => {
     // Map pain labels to descriptions
@@ -95,21 +102,55 @@ export function ScoreBreakdown({ clinic }: ScoreBreakdownProps) {
   };
 
   const getFitTooltip = () => {
+    // Determine which bonuses are active
+    const mipsScore = clinic.details.raw.avg_mips_score;
+    const hasMipsBonus = mipsScore !== null && (mipsScore > 80 || mipsScore < 50);
+    const hasHpsaMuaBonus = clinic.details.raw.is_hpsa || clinic.details.raw.is_mua;
+
     return (
       <div className="absolute z-10 mt-2 p-3 bg-brand-900 text-white text-xs rounded-lg shadow-lg w-96 left-0">
-        <p className="font-bold mb-2">Strategic Fit (Max 30 pts + Bonuses)</p>
+        <p className="font-bold mb-2">Strategic Fit (Base: 30 pts + Up to 10 Bonus)</p>
         <p className="mb-2 text-white/90">
-          <span className="font-semibold">What it measures:</span> Alignment with Charta's proven segments (FQHC, Behavioral Health) and quality indicators (MIPS, HPSA/MUA).
+          <span className="font-semibold">What it measures:</span> Alignment with Charta's proven segments (FQHC, Behavioral Health) and operational readiness.
         </p>
         <p className="mb-2 text-white/90">
-          <span className="font-semibold">Why it matters:</span> Organizations in proven segments have faster sales cycles, lower churn, and better product-market fit. MIPS/HPSA signals mission alignment.
+          <span className="font-semibold">Base scoring (30 pts):</span> Segment alignment (15) + Organization complexity (10) + Tech/Risk flags (5)
         </p>
+        <p className="mb-2 text-white/90">
+          <span className="font-semibold">Bonus points (up to 10):</span>
+        </p>
+        <ul className="ml-3 mb-2 text-white/80 text-[11px] space-y-0.5">
+          <li className={hasMipsBonus ? 'text-verified' : 'text-white/50'}>
+            {hasMipsBonus ? '✓' : '○'} MIPS Quality Bonus (+5): {
+              mipsScore !== null
+                ? mipsScore > 80
+                  ? `High performer (${mipsScore.toFixed(1)})`
+                  : mipsScore < 50
+                  ? `Distressed performer (${mipsScore.toFixed(1)})`
+                  : `Standard (${mipsScore.toFixed(1)})`
+                : 'Not applicable'
+            }
+          </li>
+          <li className={hasHpsaMuaBonus ? 'text-verified' : 'text-white/50'}>
+            {hasHpsaMuaBonus ? '✓' : '○'} HPSA/MUA Bonus (+5): {
+              hasHpsaMuaBonus
+                ? `${clinic.details.raw.is_hpsa ? 'HPSA' : ''}${clinic.details.raw.is_hpsa && clinic.details.raw.is_mua ? '/' : ''}${clinic.details.raw.is_mua ? 'MUA' : ''} designated`
+                : 'Not in shortage area'
+            }
+          </li>
+        </ul>
         <div className="mt-3 pt-2 border-t border-white/20">
-          <p className="font-semibold mb-1 text-[10px] uppercase text-white/70">Scoring Breakdown:</p>
+          <p className="font-semibold mb-1 text-[10px] uppercase text-white/70">Component Breakdown:</p>
           <ul className="space-y-1 text-white/80">
             {clinic.analysis.score_reasoning.fit.map((reason, idx) => (
               <li key={idx}>• {reason}</li>
             ))}
+            {hasMipsBonus && (
+              <li className="text-verified">• +5pts: MIPS {mipsScore! > 80 ? 'High' : 'Distressed'} performer</li>
+            )}
+            {hasHpsaMuaBonus && (
+              <li className="text-verified">• +5pts: {clinic.details.raw.is_hpsa ? 'HPSA' : ''}{clinic.details.raw.is_hpsa && clinic.details.raw.is_mua ? '/' : ''}{clinic.details.raw.is_mua ? 'MUA' : ''} designated area</li>
+            )}
           </ul>
         </div>
       </div>
@@ -126,7 +167,7 @@ export function ScoreBreakdown({ clinic }: ScoreBreakdownProps) {
       <div className="absolute z-10 mt-2 p-3 bg-brand-900 text-white text-xs rounded-lg shadow-lg w-96 left-0">
         <p className="font-bold mb-2">Strategic Value (Max 30 pts)</p>
         <p className="mb-2 text-white/90">
-          <span className="font-semibold">What it measures:</span> Deal size potential (revenue + patient volume) and expansion opportunities.
+          <span className="font-semibold">What it measures:</span> Deal size potential (revenue + volume scale) and expansion opportunities.
         </p>
         <p className="mb-2 text-white/90">
           <span className="font-semibold">Why it matters:</span> {volumeNote}
@@ -184,13 +225,20 @@ export function ScoreBreakdown({ clinic }: ScoreBreakdownProps) {
             <div className="flex items-center gap-1">
               <span className="font-semibold text-brand-900">Strategic Fit</span>
               <Info className="w-3 h-3 text-brand-500 cursor-help" />
+              {hasFitBonus && (
+                <span className="text-[9px] font-bold text-verified bg-verified/10 px-1.5 py-0.5 rounded uppercase">
+                  +{fitBonus.toFixed(1)} bonus
+                </span>
+              )}
             </div>
-            <span className="font-mono font-bold text-brand-600">{fitScore.toFixed(1)}/30 pts</span>
+            <span className="font-mono font-bold text-brand-600">
+              {fitScore.toFixed(1)}/{hasFitBonus ? '40' : '30'} pts
+            </span>
           </div>
           <div className="h-3 bg-brand-100 rounded-full overflow-hidden">
             <div
               className="h-full bg-brand-500 rounded-full transition-all"
-              style={{ width: `${(fitScore / 30) * 100}%` }}
+              style={{ width: `${Math.min(100, (fitScore / (hasFitBonus ? 40 : 30)) * 100)}%` }}
             />
           </div>
           {hoveredSection === 'fit' && getFitTooltip()}

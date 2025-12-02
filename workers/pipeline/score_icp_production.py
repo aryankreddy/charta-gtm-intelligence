@@ -393,6 +393,17 @@ def calculate_row_score(row):
     raw_seg = str(row.get('segment_label', 'default'))
     segment = raw_seg.split(' - ')[0] if ' - ' in raw_seg else raw_seg
 
+    # FIX: Hospital Override - Prevent hospitals from being classified as FQHCs
+    # Some orgs have fqhc_flag=1 incorrectly when they're actually hospitals
+    org_name = str(row.get('org_name', '')).upper()
+    hospital_keywords = ['HOSPITAL', 'MEDICAL CENTER', 'HEALTH SYSTEM', 'HOSPITAL DISTRICT']
+    is_hospital_name = any(keyword in org_name for keyword in hospital_keywords)
+
+    corrected_fqhc_flag = row.get('fqhc_flag', 0)
+    if is_hospital_name and segment == 'Segment B':
+        segment = 'Segment C'
+        corrected_fqhc_flag = 0  # Clear incorrect FQHC flag
+
     confidence = 0
     pain_reasoning = []
     fit_reasoning = []
@@ -692,9 +703,19 @@ def calculate_row_score(row):
     elif track == 'BEHAVIORAL':
         drivers.append("Behavioral Health - Core ICP")
 
+    # Determine volume unit based on source
+    # CRITICAL: Distinguish between "patients" (UDS) and "encounters" (Claims)
+    volume_unit = "encounters"  # Default: conservative assumption
+    if pd.notna(volume_source):
+        if 'UDS' in volume_source.upper() or 'HRSA UDS' in volume_source.upper():
+            volume_unit = "patients"  # UDS data = unique patients
+        elif 'CLAIMS' in volume_source.upper() or 'MEDICARE' in volume_source.upper():
+            volume_unit = "encounters"  # Claims data = visits/encounters
+        # Estimated/Unknown defaults to encounters (conservative)
+
     # Value Drivers
     if s3_volume >= 12:
-        drivers.append(f"High Volume ({int(vol_metric/1000)}k patients)")
+        drivers.append(f"High Volume ({int(vol_metric/1000)}k {volume_unit})")
     elif site_count > 5:
         drivers.append(f"Multi-Site Network ({int(site_count)} sites)")
 
@@ -744,6 +765,8 @@ def calculate_row_score(row):
     return {
         'icp_score': min(100, total),  # Cap at 100
         'icp_tier': tier,
+        'segment_label': segment,  # CORRECTED: Include hospital override fix
+        'fqhc_flag': corrected_fqhc_flag,  # CORRECTED: Clear flag if hospital misclassified as FQHC
         'scoring_track': track,
         'pain_label': pain_label,  # NEW: Dynamic pain driver label
         'data_confidence': min(100, confidence),
@@ -778,6 +801,7 @@ def calculate_row_score(row):
         # Metrics
         'metric_est_revenue': est_rev,
         'metric_used_volume': vol_metric,
+        'volume_unit': volume_unit,  # NEW: "patients" or "encounters" for accurate labeling
 
         # Reasoning (for transparency)
         'score_reasoning_pain': " | ".join(pain_reasoning),

@@ -134,36 +134,124 @@ def parse_drivers(scoring_drivers_str):
     return drivers[:3]  # Limit to top 3 drivers
 
 
-def calculate_lift(final_revenue, undercoding_ratio):
+def calculate_lift(final_revenue, undercoding_ratio, psych_risk_ratio, segment_label, scoring_track):
     """
-    Calculate revenue lift opportunity.
+    Calculate revenue opportunity with payer mix economics and denial prevention.
 
-    Logic:
-    - If undercoding_ratio is valid (< 0.5):
-      - Lift = final_revenue * (0.50 - undercoding_ratio)
-      - Label: "Verified Opportunity"
-      - is_projected: False
-    - Else:
-      - Lift = final_revenue * 0.05 (5% benchmark)
-      - Label: "Est. Opportunity"
-      - is_projected: True
+    NEW LOGIC (v12.0):
+    1. "Winning" Check: Organizations already at/above benchmark get $0 coding lift
+       - AMBULATORY: undercoding_ratio >= 0.45 → WINNING
+       - BEHAVIORAL: psych_risk_ratio in [0.40, 0.60] OR > 0.60 → WINNING
+    2. FQHC Payer Mix Discount: Segment B gets coding_lift * 0.20 (80% PPS, 20% FFS)
+    3. Denial Prevention: Always calculated at 5% of revenue (separate from coding)
+
+    Returns dict with 7 fields:
+    - total_opportunity_value: coding_lift + denial_prevention (main display)
+    - coding_lift_value: Track-specific lift calculation
+    - denial_prevention_value: Always 5% of revenue
+    - is_projected_lift: Whether lift is verified or estimated
+    - lift_basis: Human-readable label
+    - payer_mix_applied: Boolean if FQHC discount applied
+    - winning_status: 'WINNING' | 'OPPORTUNITY' | 'UNKNOWN'
     """
+    # Initialize default values
+    coding_lift = 0
+    denial_prevention = final_revenue * 0.05 if final_revenue > 0 else 0
+    is_projected = False
+    lift_basis = "Unknown"
+    payer_mix_applied = False
+    winning_status = "UNKNOWN"
+
+    # Validate inputs - return zeros if no revenue
     if pd.isna(final_revenue) or final_revenue == 0:
-        return 0, "N/A", True
+        return {
+            'total_opportunity_value': 0,
+            'coding_lift_value': 0,
+            'denial_prevention_value': 0,
+            'is_projected_lift': True,
+            'lift_basis': "N/A",
+            'payer_mix_applied': False,
+            'winning_status': "UNKNOWN"
+        }
 
-    # Check if undercoding_ratio is valid
-    if pd.notna(undercoding_ratio) and 0 < undercoding_ratio < 0.5:
-        # Verified opportunity based on actual coding gap
-        lift = final_revenue * (0.50 - undercoding_ratio)
-        label = "Verified Opportunity"
-        is_projected = False
+    # TRACK-SPECIFIC WINNING LOGIC
+    if scoring_track == 'AMBULATORY':
+        # E&M/Medical Track - Uses undercoding_ratio
+        if pd.notna(undercoding_ratio) and 0 < undercoding_ratio < 1.0:
+            # Winning check: If >= 0.45 (national avg), no coding lift
+            if undercoding_ratio >= 0.45:
+                coding_lift = 0
+                lift_basis = "Already Winning (E&M)"
+                winning_status = "WINNING"
+                is_projected = False
+            else:
+                # Opportunity: Calculate gap to 50% target
+                coding_lift = final_revenue * (0.50 - undercoding_ratio)
+                lift_basis = "Verified Opportunity (E&M)"
+                winning_status = "OPPORTUNITY"
+                is_projected = False
+        else:
+            # Fallback: 5% benchmark when no valid data
+            coding_lift = final_revenue * 0.05
+            lift_basis = "Est. Opportunity (E&M)"
+            winning_status = "UNKNOWN"
+            is_projected = True
+
+    elif scoring_track == 'BEHAVIORAL':
+        # Therapy/Behavioral Track - Uses psych_risk_ratio
+        if pd.notna(psych_risk_ratio) and 0 < psych_risk_ratio < 1.0:
+            # Winning check: If in sweet spot (0.40-0.60) OR audit risk (>0.60)
+            if psych_risk_ratio >= 0.40 and psych_risk_ratio <= 0.60:
+                coding_lift = 0
+                lift_basis = "Already Winning (Therapy - Optimal Range)"
+                winning_status = "WINNING"
+                is_projected = False
+            elif psych_risk_ratio > 0.60:
+                coding_lift = 0
+                lift_basis = "Already Winning (Therapy - Audit Risk)"
+                winning_status = "WINNING"
+                is_projected = False
+            else:  # psych_risk_ratio < 0.40 (conservative coding)
+                # Opportunity: Calculate gap to 50% target
+                coding_lift = final_revenue * (0.50 - psych_risk_ratio)
+                lift_basis = "Verified Opportunity (Therapy)"
+                winning_status = "OPPORTUNITY"
+                is_projected = False
+        else:
+            # Fallback: 5% benchmark when no valid data
+            coding_lift = final_revenue * 0.05
+            lift_basis = "Est. Opportunity (Therapy)"
+            winning_status = "UNKNOWN"
+            is_projected = True
+
     else:
-        # Projected opportunity using 5% benchmark
-        lift = final_revenue * 0.05
-        label = "Est. Opportunity"
+        # POST_ACUTE or other tracks - Use 5% benchmark
+        coding_lift = final_revenue * 0.05
+        lift_basis = "Est. Opportunity (Post-Acute)"
+        winning_status = "UNKNOWN"
         is_projected = True
 
-    return lift, label, is_projected
+    # FQHC PAYER MIX DISCOUNT
+    # Apply AFTER winning check, BEFORE summing with denial prevention
+    if segment_label == 'Segment B' and coding_lift > 0:
+        # Discounting for estimated 20% Commercial/FFS Payer Mix
+        # FQHCs receive 80% PPS (flat rate), only 20% benefit from coding optimization
+        coding_lift = coding_lift * 0.20
+        payer_mix_applied = True
+        lift_basis = lift_basis + " (FQHC Discounted)"
+
+    # CALCULATE TOTAL OPPORTUNITY
+    total_opportunity = coding_lift + denial_prevention
+
+    return {
+        'total_opportunity_value': total_opportunity,
+        'coding_lift_value': coding_lift,
+        'denial_prevention_value': denial_prevention,
+        'is_projected_lift': is_projected,
+        'lift_basis': lift_basis,
+        'payer_mix_applied': payer_mix_applied,
+        'winning_status': winning_status
+    }
 
 
 def calculate_billing_ratio(undercoding_ratio):
@@ -404,26 +492,26 @@ def extract_raw_scores(row):
     return {
         'pain': {
             'total': pain_total,
-            'signal': safe_int(row.get('score_pain_signal')),
+            'signal': safe_float(row.get('score_pain_signal')),
             'volume': 0,      # Removed in v8.0
             'margin': 0,      # Removed in v8.0
             'compliance': 0   # Removed in v8.0
         },
         'fit': {
             'total': fit_total,
-            'alignment': safe_int(row.get('score_fit_align')),
-            'complexity': safe_int(row.get('score_fit_complex')),
+            'alignment': safe_float(row.get('score_fit_align')),
+            'complexity': safe_float(row.get('score_fit_complex')),
             'chaos': 0,       # Removed in v8.0
-            'risk': safe_int(row.get('score_fit_risk'))
+            'risk': safe_float(row.get('score_fit_risk'))
         },
         'strategy': {
             'total': strat_total,
-            'deal_size': safe_int(row.get('score_strat_deal')),      # Revenue score
-            'expansion': safe_int(row.get('score_strat_expand')),    # Whale scale
+            'deal_size': safe_float(row.get('score_strat_deal')),      # Revenue score
+            'expansion': safe_float(row.get('score_strat_expand')),    # Whale scale
             'referrals': 0    # Removed in v8.0
         },
         'bonus': {
-            'strategic_scale': 0  # No bonuses in v8.0
+            'strategic_scale': 0  # No bonuses in v8.0 (MIPS/HPSA bonuses included in fit total)
         },
         'base_before_bonus': icp_score,  # Same as total in v8.0
         'final_score': icp_score
@@ -589,7 +677,13 @@ def generate_json():
 
     # Calculate lift values for sorting
     df['_lift_value'] = df.apply(
-        lambda row: calculate_lift(row['final_revenue'], row.get('undercoding_ratio'))[0],
+        lambda row: calculate_lift(
+            final_revenue=row['final_revenue'],
+            undercoding_ratio=row.get('undercoding_ratio'),
+            psych_risk_ratio=row.get('psych_risk_ratio'),
+            segment_label=str(row.get('segment_label', 'Unknown')),
+            scoring_track=str(row.get('scoring_track', 'AMBULATORY'))
+        )['total_opportunity_value'],
         axis=1
     )
 
@@ -605,6 +699,8 @@ def generate_json():
     verified_count = 0
     projected_count = 0
     revenue_normalized_count = 0
+    fqhc_discounted_count = 0
+    winning_clinics_count = 0
 
     for _, row in top_clinics.iterrows():
         # Extract production columns
@@ -632,15 +728,37 @@ def generate_json():
         scoring_drivers = row.get('scoring_drivers', '')
         drivers = parse_drivers(scoring_drivers)
 
-        # Lift Calculation
+        # Lift Calculation - NEW: Enhanced with payer mix and denial prevention
         undercoding_ratio = row.get('undercoding_ratio')
-        lift_value, lift_label, is_projected = calculate_lift(final_revenue, undercoding_ratio)
+        psych_risk_ratio = row.get('psych_risk_ratio')
+        scoring_track = str(row.get('scoring_track', 'AMBULATORY'))
+
+        # Call enhanced lift calculation
+        lift_result = calculate_lift(
+            final_revenue=final_revenue,
+            undercoding_ratio=undercoding_ratio,
+            psych_risk_ratio=psych_risk_ratio,
+            segment_label=segment_label,
+            scoring_track=scoring_track
+        )
+
+        # Unpack for backward compatibility
+        lift_value = lift_result['total_opportunity_value']
+        lift_label = lift_result['lift_basis']
+        is_projected = lift_result['is_projected_lift']
         est_revenue_lift = format_revenue(lift_value)
 
+        # Track statistics
         if is_projected:
             projected_count += 1
         else:
             verified_count += 1
+
+        if lift_result['payer_mix_applied']:
+            fqhc_discounted_count += 1
+
+        if lift_result['winning_status'] == 'WINNING':
+            winning_clinics_count += 1
 
         # Billing Ratio Chart
         billing_ratio = calculate_billing_ratio(undercoding_ratio)
@@ -688,6 +806,9 @@ def generate_json():
         # Dynamic Pain Label (NEW)
         pain_label = str(row.get('pain_label', 'Economic Pain'))
 
+        # Volume Unit (NEW) - Critical for accurate labeling
+        volume_unit = str(row.get('volume_unit', 'encounters'))  # Default to encounters (conservative)
+
         # Assemble clinic object
         clinic = {
             "id": npi,
@@ -698,9 +819,17 @@ def generate_json():
             "state": state,
             "revenue": revenue,
             "volume": volume,
+            "volume_unit": volume_unit,  # NEW: "patients" or "encounters" for UI labeling
             "est_revenue_lift": est_revenue_lift,
             "is_projected_lift": is_projected,
             "lift_basis": lift_label,
+            "opportunity_breakdown": {
+                "total": format_revenue(lift_result['total_opportunity_value']),
+                "coding_lift": format_revenue(lift_result['coding_lift_value']),
+                "denial_prevention": format_revenue(lift_result['denial_prevention_value']),
+                "payer_mix_applied": lift_result['payer_mix_applied'],
+                "winning_status": lift_result['winning_status']
+            },
             "billing_ratio": billing_ratio,
             "primary_driver": primary_driver,
             "drivers": drivers,
@@ -716,6 +845,7 @@ def generate_json():
                 "raw": {
                     "undercoding_ratio": float(undercoding_ratio) if pd.notna(undercoding_ratio) else None,
                     "volume_source": str(row.get('volume_source', 'Unknown')),
+                    "volume_unit": volume_unit,  # NEW: Add to raw details for tooltip logic
                     "revenue_source": str(row.get('revenue_source', 'Unknown')),
                     "avg_mips_score": float(avg_mips_score) if pd.notna(avg_mips_score) else None,
                     "mips_clinician_count": int(mips_clinician_count) if pd.notna(mips_clinician_count) else None,
@@ -740,6 +870,8 @@ def generate_json():
     print(f"   Revenue Normalized: {revenue_normalized_count:,} clinics (< $10k → * 1,000)")
     print(f"   Verified Opportunities: {verified_count} ({verified_count/len(output_data)*100:.1f}%)")
     print(f"   Projected Opportunities: {projected_count} ({projected_count/len(output_data)*100:.1f}%)")
+    print(f"   FQHCs with Payer Mix Discount: {fqhc_discounted_count} ({fqhc_discounted_count/len(output_data)*100:.1f}%)")
+    print(f"   'Winning' Clinics (0 Coding Lift): {winning_clinics_count} ({winning_clinics_count/len(output_data)*100:.1f}%)")
     print(f"\n📊 Score Distribution:")
     print(f"   Tier 1 (≥70): {sum(1 for c in output_data if c['score'] >= 70)}")
     print(f"   Tier 2 (50-69): {sum(1 for c in output_data if 50 <= c['score'] < 70)}")

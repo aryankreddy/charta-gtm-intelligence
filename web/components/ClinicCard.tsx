@@ -17,6 +17,7 @@ interface Clinic {
     state: string;
     revenue: string;
     volume: string;
+    volume_unit: string;  // "patients" or "encounters"
     drivers: Driver[];
 }
 
@@ -85,13 +86,18 @@ export const ClinicCard: React.FC<ClinicCardProps> = ({ clinic, onClick }) => {
                                 <div className="absolute left-0 top-full mt-2 w-80 p-3 bg-gray-900 text-white rounded-lg shadow-xl z-50">
                                     <p className="font-bold mb-2 text-xs">High Volume Indicator:</p>
                                     <p className="text-xs mb-2">
-                                        Organizations with <span className="font-semibold">verified patient volume exceeding 25,000 patients</span> receive this designation.
+                                        Organizations with <span className="font-semibold">verified volume exceeding 25,000 {clinic.volume_unit}</span> receive this designation.
+                                    </p>
+                                    <p className="text-xs mb-2">
+                                        <span className="font-semibold">What this means:</span> {clinic.volume_unit === 'patients'
+                                          ? 'Unique patients served annually (verified from HRSA UDS reports).'
+                                          : 'Annual patient encounters/visits (from Medicare claims data).'}
                                     </p>
                                     <p className="text-xs mb-2">
                                         <span className="font-semibold">Why this matters:</span> High-volume organizations represent larger deal sizes and greater revenue potential from coding optimization.
                                     </p>
                                     <p className="text-xs text-white/80">
-                                        Volume is verified from HRSA UDS reports or aggregated Medicare claims data. Organizations with lower volume but multiple sites may receive "Multi-Site Network" instead. The threshold balances deal size with implementation complexity.
+                                        Organizations with lower volume but multiple sites may receive "Multi-Site Network" instead.
                                     </p>
                                 </div>
                             )}
